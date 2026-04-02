@@ -59,7 +59,7 @@ Var = "Hs"  #  ['Dm', 'Hs', 'Tm', 'Tp']
 # ]
 
 county_list = [
-    "Clallam"]
+    "IslandCounty","Jefferson"]
 
 # ===============================================================================
 # %% Define some functions
