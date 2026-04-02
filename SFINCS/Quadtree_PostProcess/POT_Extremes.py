@@ -19,20 +19,25 @@ _UNIT_TO_NS = {
 }
 
 
-def _parse_timedelta_to_ns(r: str) -> int:
+def _parse_timedelta_to_ns(r: str | np.timedelta64) -> int:
     """
-    Parse a simple duration string (e.g., '24h', '12D', '3600s') to nanoseconds (int).
-    Supports integer magnitudes only. Raises ValueError for invalid input.
+    Parse duration to nanoseconds (int). Supports numpy.timedelta64 or simple strings (e.g., '24h').
+    Integer magnitudes only for strings.
     """
+    import pandas as pd
+
     if isinstance(r, np.timedelta64):
-        # Convert to ns
-        return int(np.timedelta64(r, "ns").astype("timedelta64[ns]").astype(np.int64))
+        # Direct cast to ns then to int
+        return int(r.astype("timedelta64[ns]").astype(np.int64))
+
+    # Optional: support pandas Timedelta
+    if isinstance(r, pd.Timedelta):
+        return int(r.to_numpy().astype("timedelta64[ns]").astype(np.int64))
 
     if not isinstance(r, str):
-        raise ValueError(f"`r` must be str or numpy.timedelta64, got {type(r)}")
+        raise ValueError(f"`r` must be str, numpy.timedelta64, or pandas.Timedelta; got {type(r)}")
 
     s = r.strip()
-    # Find boundary between digits and unit
     i = 0
     while i < len(s) and s[i].isdigit():
         i += 1
@@ -52,13 +57,17 @@ def _parse_timedelta_to_ns(r: str) -> int:
     return mag * _UNIT_TO_NS[unit]
 
 
+
 def _validate_1d_time_series(da: xr.DataArray, time_dim: str) -> None:
     """Ensure DataArray is 1D along `time_dim` and coordinate is datetime64."""
     if time_dim not in da.dims:
         raise ValueError(
             f"`time_dim` {time_dim!r} not found in DataArray"
         )
-
+    
+    if not np.issubdtype(da.dtype, np.number):
+        raise TypeError(f"DataArray values must be numeric; got dtype={da.dtype}")
+    
     # Require ONLY the time dimension (1D series)
     if da.ndim != 1 or da.dims[0] != time_dim:
         raise ValueError(
@@ -138,6 +147,7 @@ def get_extremes_pot_xr(
     threshold: float,
     r: str = "24h",
     time_dim: str = "time",
+    num_exce: Optional[int] = None,
 ) -> xr.DataArray:
     """
     Decluster exceedances (Peaks Over Threshold) and return cluster maxima as an xr.DataArray.
@@ -152,6 +162,10 @@ def get_extremes_pot_xr(
         Independence window (e.g., '24h', '48h', '3600s', '1D'). Integer magnitudes only.
     time_dim : str, default 'time'
         Name of the time dimension.
+    num_exce : int, optional
+        If provided, limit the output to the **top `num_exce` declustered peaks by value**.
+        Ties are broken by **latest** time. Returned events are sorted back to **chronological**
+        order for usability. If `num_exce` >= number of declustered peaks, all peaks are returned.
 
     Returns
     -------
@@ -174,7 +188,20 @@ def get_extremes_pot_xr(
     if evt_vals.size == 0:
         raise ValueError("Threshold yields zero exceedances.")
 
-    # Build an xr.DataArray with event timestamps as coordinates
+    # Optional: cap to exact number of extremes by selecting top-k by value
+    if num_exce is not None:
+        if not isinstance(num_exce, int) or num_exce <= 0:
+            raise ValueError("`num_exce` must be a positive integer when provided.")
+        if evt_vals.size > num_exce:
+            # Sort by value desc, then time desc (prefer later time),
+            # then return selected events in chronological order.
+            t_ns = evt_times.astype("datetime64[ns]").astype(np.int64)
+            order_by_value_then_time = np.lexsort((-t_ns, -evt_vals))
+            select_idx = order_by_value_then_time[:num_exce]
+            chrono = np.argsort(t_ns[select_idx])
+            evt_times = evt_times[select_idx][chrono]
+            evt_vals = evt_vals[select_idx][chrono]
+
     extremes = xr.DataArray(
         data=evt_vals,
         coords={time_dim: evt_times},
@@ -183,6 +210,7 @@ def get_extremes_pot_xr(
         attrs=dict(**da.attrs),
     )
     return extremes
+
 
 
 def pot_threshold_set_num_xr(
@@ -275,36 +303,33 @@ def pot_threshold_set_num_xr(
             return float(unique_vals[0])
         return float(unique_vals[ans])
 
+    
     elif strategy == "closest":
-        # Find bound then check neighbor for minimal absolute difference
-        # Start with the 'geq' bound
-        lo, hi = 0, unique_vals.size - 1
-        geq_idx = None
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            c = count_at(mid)
-            if c >= num_exce:
-                geq_idx = mid
-                hi = mid - 1
+            lo, hi = 0, unique_vals.size - 1
+            geq_idx = None
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                c = count_at(mid)
+                if c >= num_exce:
+                    geq_idx = mid
+                    hi = mid - 1
+                else:
+                    lo = mid + 1
+            candidates = []
+            if geq_idx is not None:
+                candidates.append(geq_idx)
+                if geq_idx + 1 < unique_vals.size:
+                    candidates.append(geq_idx + 1)
             else:
-                lo = mid + 1
-        candidates = []
-        if geq_idx is not None:
-            candidates.append(geq_idx)
-        if geq_idx is not None and geq_idx + 1 < unique_vals.size:
-            candidates.append(geq_idx + 1)
-        if geq_idx is None:
-            # If we never reach >= num_exce, check last
-            candidates.append(unique_vals.size - 1)
-        # Evaluate candidates
-        best_i = None
-        best_diff = None
-        for i in candidates:
-            diff = abs(count_at(i) - num_exce)
-            if best_diff is None or diff < best_diff:
-                best_diff = diff
-                best_i = i
-        return float(unique_vals[best_i])
+                # Never reaches >= num_exce: choose the smallest threshold (max counts)
+                candidates.append(0)
+            best_i, best_diff = None, None
+            for i in candidates:
+                diff = abs(count_at(i) - num_exce)
+                if best_diff is None or diff < best_diff:
+                    best_diff, best_i = diff, i
+            return float(unique_vals[best_i])
+
 
     else:
         raise ValueError("`strategy` must be one of {'geq','leq','closest'}")
@@ -427,7 +452,8 @@ def pot_threshold_set_num_map(
                 if geq_idx + 1 < unique_vals.size:
                     candidates.append(geq_idx + 1)
             else:
-                candidates.append(unique_vals.size - 1)
+                # Never reaches >= num_exce: choose the smallest threshold (max counts)
+                candidates.append(0)
             best_i, best_diff = None, None
             for i in candidates:
                 diff = abs(count_at(i) - num_exce)

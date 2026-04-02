@@ -30,8 +30,12 @@ import xarray as xr
 from functools import partial
 from typing import Optional, Sequence, Tuple, Literal
 
-from POT_Extremes import  pot_threshold_set_num_xr, get_extremes_pot_xr
-from Xarray_NCtools import batch_check_nc_files, ensure_unique_sorted_time,_detect_time_coord
+from POT_Extremes import pot_threshold_set_num_xr, get_extremes_pot_xr
+from Xarray_NCtools import (
+    batch_check_nc_files,
+    ensure_unique_sorted_time,
+    _detect_time_coord,
+)
 
 # ===============================================================================
 # User inputs
@@ -57,15 +61,13 @@ return_period_wanted = [int(RP) for RP in return_period_wanted]
 sub_categories = [sub.replace("_median", "") for sub in sub_categories]
 
 
-
 # User settings
 # return_period_wanted    = [1, 2, 5, 10, 20, 50, 100]     # number of years requested
 hh_criteria = 0.010001  # just above the treshold from SFINCS
 
 # Directory
-include_qmax = 1
-include_tmax = 1
-include_tmax_zs = 1
+include_qmax = True
+include_tmax = True
 
 
 # ===============================================================================
@@ -112,7 +114,7 @@ def preprocess_(
     - Assumes `vars_to_keep` and `coords_to_keep` exist in the outer scope
     - Works with both numpy datetime64 and cftime calendars via `.dt.year`.
     """
-    # --- 1) Subset variables and coords 
+    # --- 1) Subset variables and coords
     requested = [*(vars_to_keep or []), *(coords_to_keep or [])]
     names = [n for n in requested if n in ds]  # ds keys include data_vars + coords
 
@@ -190,6 +192,16 @@ def preprocess_(
 
 
 # ===============================================================================
+# Some pre-processing
+# ===============================================================================
+if include_qmax:
+    vars_to_keep.append("qmax")
+
+if include_tmax:
+    vars_to_keep.append("tmax")
+
+
+# ===============================================================================
 # Load the data
 # ===============================================================================
 
@@ -208,9 +220,9 @@ for county in counties:
             destin_TMP = os.path.join(destin, county)
             TMP_string = slr + category
             destin_TMP = os.path.join(destin_TMP, TMP_string)
-            
+
             # ===============================================================================
-            # Check all the files are good to go 
+            # Check all the files are good to go
             # ===============================================================================
 
             # Get list of files for the run
@@ -247,11 +259,9 @@ for county in counties:
             total_years = len(files)
             estimate_runtimes = []
 
-          
             # ===============================================================================
-            # Load all the Data 
+            # Load all the Data
             # ===============================================================================
-
 
             # Automatically trim to the most common year (mode) if you don't pass year/start/end.
             # If multiple years tie (same count), choose the earliest; set tie_break='latest' to prefer the latest.
@@ -283,28 +293,38 @@ for county in counties:
             # ===============================================================================
             # Calculate the maximums
             # ===============================================================================
-                        
 
-            r = "48h"   # Deculstering time window for POT (e.g., 24h, 48h, etc.)
+            r = "48h"  # Deculstering time window for POT (e.g., 24h, 48h, etc.)
             num_target = total_years
-            
-            tmax_out =np.empty((ds["nmesh2d_face"].size, num_target),dtype='datetime64[ns]')
-            zmax_out = np.empty((ds["nmesh2d_face"].size, num_target),dtype= np.float32)
-            
-            for station in ds['nmesh2d_face']:
-                pull = ds['zsmax'].sel(nmesh2d_face=station)
 
-                if pull.isnull().all():
-                    print(f"Station {station.values} has all NaN values; skipping POT analysis.")
-                else:
-                    th = pot_threshold_set_num_xr(pull, r=r, num_exce=total_years, time_dim="timemax", strategy="geq")
-                    extremes = get_extremes_pot_xr(pull,th, r=r, time_dim="timemax")
-                tmax_out[station,:] = extremes['timemax'].values
-                zmax_out[station,:] = extremes.values
+            tmax_out = np.empty(
+                (ds["nmesh2d_face"].size, num_target), dtype="datetime64[ns]"
+            )
 
-            
+            for var in vars_to_keep:
+                tmax_out = np.empty((ds["nmesh2d_face"].size, num_target), dtype="datetime64[ns]")
+                var_out = np.empty((ds["nmesh2d_face"].size, num_target), dtype=np.float32)
+                for station in ds["nmesh2d_face"]:
+                    pull = ds[var].sel(nmesh2d_face=station)
+
+                    if (pull.isnull().all()) or ((pull == 0).all().all()):
+                        print(
+                            f"Station {station.values} has all NaN values; skipping POT analysis."
+                        )
+                    else:
+                        th = pot_threshold_set_num_xr(
+                            pull,
+                            r=r,
+                            num_exce=total_years,
+                            time_dim="timemax",
+                            strategy="closest",
+                        )
+                        extremes = get_extremes_pot_xr(pull, th, r=r, time_dim="timemax",num_exce=total_years)
+                    
+                    tmax_out[station, :] = extremes["timemax"].values
+                    var_out[station, :] = extremes.values
+
             adsf
-
 
             # Reading done
             # Make empty matrix
