@@ -30,11 +30,11 @@ import dask.distributed
 #===============================================================================
 # Directory where the WFLOW data resides
 #dir_in = r'D:\DFM'
-dir_in = r'Y:\WFLOW\20240801_discharges'
-dir_out = r'Y:\WFLOW\20240801_discharges'
+dir_in = r'Y:\PS_Cosmos\02_models\WFLOW\11_20_2025_Discharges_SnohomishKitsap'
+dir_out = r'Y:\PS_Cosmos\02_models\WFLOW\11_20_2025_Discharges_SnohomishKitsap'
 
 # model grid to process (county)
-cnty = 'pierce'
+cnty = 'kitsap'
 
 #===============================================================================
 # %% Define some functions
