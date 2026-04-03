@@ -30,12 +30,13 @@ import xarray as xr
 from functools import partial
 from typing import Optional, Sequence, Tuple, Literal
 
-from POT_Extremes import pot_threshold_set_num_xr, get_extremes_pot_xr
+from POT_Extremes import pot_threshold_set_num_xr, get_extremes_pot_xr, rp_axis
 from Xarray_NCtools import (
     batch_check_nc_files,
     ensure_unique_sorted_time,
     _detect_time_coord,
 )
+from SFINCS_QuadtreeTools import load_SfincsQuadtree
 
 # ===============================================================================
 # User inputs
@@ -53,7 +54,7 @@ sub_categories = ["_median"]  # ,'_low','_high'
 # Choose the data variables you want to keep
 # Define at module scope (important for Dask pickling when parallel=True)
 vars_to_keep: Sequence[str] | None = ["zsmax"]
-coords_to_keep: Sequence[str] | None = ["timemax", "nmesh2d_face"]
+coords_to_keep: Sequence[str] | None = ["timemax"]
 
 
 # Some processing of the inputs
@@ -67,7 +68,7 @@ hh_criteria = 0.010001  # just above the treshold from SFINCS
 
 # Directory
 include_qmax = True
-include_tmax = True
+include_tmax = False
 
 
 # ===============================================================================
@@ -232,13 +233,11 @@ for county in counties:
             ]
 
             # Check the files before we try to combine them.
-            required_vars = ["zsmax"]  # e.g., ["eta", "depth", "waterlevel"]
-            required_coords = ["timemax"]  # e.g., ["time", "lat", "lon"]
 
             good_files, report, schema = batch_check_nc_files(
                 files,
-                required_vars=required_vars,
-                required_coords=required_coords,
+                required_vars=vars_to_keep,
+                required_coords=coords_to_keep,
                 check_time=True,
                 sample_data=False,  # set True if you want to trigger decode/scale on tiny slices
             )
@@ -290,352 +289,355 @@ for county in counties:
 
             ds = ensure_unique_sorted_time(ds, time_name="timemax", keep="first")
 
+            # Load the bedlevel
+            xc, yc, zb = load_SfincsQuadtree(os.path.join(destin_TMP, "sfincs.nc"))
+
             # ===============================================================================
             # Calculate the maximums
             # ===============================================================================
 
             r = "48h"  # Deculstering time window for POT (e.g., 24h, 48h, etc.)
-            num_target = total_years
+            num_exce = total_years
+            num_grid = ds["nmesh2d_face"].size
 
-            tmax_out = np.empty(
-                (ds["nmesh2d_face"].size, num_target), dtype="datetime64[ns]"
+            # Initialize output arrays
+            tzsmax_out = np.empty((num_grid, num_exce), dtype="datetime64[ns]")
+
+            zsmax_out = np.empty((num_grid, num_exce), dtype=np.float32)
+
+            # create a mask to identify stations with all NaN or all zero values across time
+            mask_all_nan = (
+                ds["zsmax"].isnull().all(dim="timemax")
+            )  # True where every time step is NaN for each face
+            mask_all_zero = (ds["zsmax"].fillna(0) == 0).all(dim="timemax")
+            mask_all_neg = (
+                (ds["zsmax"] < -100)
+                .where(ds["zsmax"].notnull(), True)
+                .all(dim="timemax")
             )
 
-            for var in vars_to_keep:
-                tmax_out = np.empty((ds["nmesh2d_face"].size, num_target), dtype="datetime64[ns]")
-                var_out = np.empty((ds["nmesh2d_face"].size, num_target), dtype=np.float32)
-                for station in ds["nmesh2d_face"]:
-                    pull = ds[var].sel(nmesh2d_face=station)
+            # Combined mask of good data
+            mask = ~(mask_all_nan | mask_all_zero | mask_all_neg).compute()
 
-                    if (pull.isnull().all()) or ((pull == 0).all().all()):
-                        print(
-                            f"Station {station.values} has all NaN values; skipping POT analysis."
+            print(
+                f"{np.sum(~mask).values} stations out of {mask.shape} have all NaN, zero, or negative values and will be skipped."
+            )
+
+            # Run through the grid faces and use POT to find maximums
+            faces = ds["nmesh2d_face"].values
+            nfaces = faces.size
+
+            # Preallocate outputs
+            exceedance = np.arange(num_exce)
+
+            tzsmax_out = xr.DataArray(
+                np.full((nfaces, num_exce), np.datetime64("NaT")),
+                dims=("nmesh2d_face", "exceedance"),
+                coords={"nmesh2d_face": faces, "exceedance": exceedance},
+                name="tzsmax",
+            )
+
+            zsmax_out = xr.DataArray(
+                np.full((nfaces, num_exce), np.nan, dtype=float),
+                dims=("nmesh2d_face", "exceedance"),
+                coords={"nmesh2d_face": faces, "exceedance": exceedance},
+                name="zsmax",
+            )
+
+            threshold_out = xr.DataArray(
+                np.full(nfaces, np.nan, dtype=float),
+                dims=("nmesh2d_face",),
+                coords={"nmesh2d_face": faces},
+                name="zs_threshold",
+            )
+
+            # Run through the grid faces and use POT to find maximums
+            for station in ds["nmesh2d_face"]:
+                if mask.sel(nmesh2d_face=station):
+                    pull = ds["zsmax"].sel(nmesh2d_face=station)
+
+                    th = pot_threshold_set_num_xr(
+                        pull,
+                        r=r,
+                        num_exce=num_exce,
+                        time_dim="timemax",
+                        strategy="closest",
+                    )
+
+                    threshold_out.loc[dict(nmesh2d_face=station)] = (
+                        float(th.values) if hasattr(th, "values") else float(th)
+                    )
+
+                    extremes = get_extremes_pot_xr(
+                        pull, th, r=r, time_dim="timemax", num_exce=num_exce
+                    )
+
+                    # k = number of extremes found (could be < num_exce)
+                    k = min(num_exce, extremes.sizes.get("timemax", num_exce))
+
+                    # Assign time + value into 2D arrays
+                    tzsmax_out.loc[
+                        dict(nmesh2d_face=station, exceedance=slice(0, k))
+                    ] = extremes["timemax"].values[:k]
+                    zsmax_out.loc[
+                        dict(nmesh2d_face=station, exceedance=slice(0, k))
+                    ] = extremes.values[:k]
+
+            # --- Build Dataset ---
+            ds_maxes = xr.Dataset(
+                {
+                    "tzsmax": tzsmax_out,  # datetime64, shape (nmesh2d_face, exceedance)
+                    "zsmax": zsmax_out,  # float,       shape (nmesh2d_face, exceedance)
+                    "zs_threshold": threshold_out,  # float,       shape (nmesh2d_face,)
+                },
+                coords={
+                    "nmesh2d_face": faces,
+                    "exceedance": exceedance,
+                },
+            )
+
+            # --- dd other variables at the same exceedance times ---
+            # We want values of other variables at the POT times for each face.
+            if len(vars_to_keep) > 1:
+                for var in vars_to_keep[1:]:
+                    # Output array for this var aligned to (face, exceedance)
+                    var_out = xr.DataArray(
+                        np.full((nfaces, num_exce), np.nan, dtype=float),
+                        dims=("nmesh2d_face", "exceedance"),
+                        coords={"nmesh2d_face": faces, "exceedance": exceedance},
+                        name=var,
+                    )
+                    # Fill per face using tzsmax_out times
+                    for station in faces:
+                        tvals = tzsmax_out.sel(
+                            nmesh2d_face=station
+                        ).values  # (num_exce,)
+                        valid = ~np.isnat(tvals)
+                        if not np.any(valid):
+                            continue
+
+                        # Select variable values at the extreme times for *this* face.
+                        v_face = ds[var].sel(nmesh2d_face=station)
+                        vsel = v_face.sel(
+                            timemax=xr.DataArray(tvals[valid], dims=["exceedance"])
                         )
-                    else:
-                        th = pot_threshold_set_num_xr(
-                            pull,
-                            r=r,
-                            num_exce=total_years,
-                            time_dim="timemax",
-                            strategy="closest",
-                        )
-                        extremes = get_extremes_pot_xr(pull, th, r=r, time_dim="timemax",num_exce=total_years)
-                    
-                    tmax_out[station, :] = extremes["timemax"].values
-                    var_out[station, :] = extremes.values
 
-            adsf
+                        var_out.loc[
+                            dict(nmesh2d_face=station, exceedance=np.where(valid)[0])
+                        ] = vsel.values
 
-            # Reading done
-            # Make empty matrix
-            if count_years == 0:
-                zsmax_matrix = np.full(
-                    (total_years, np.size(zsmax, 0), np.size(zsmax, 1)), np.nan
-                )
-                if include_qmax == 1:
-                    qmax_matrix = np.full(
-                        (total_years, np.size(zsmax, 0), np.size(zsmax, 1)), np.nan
-                    )
-                if include_tmax == 1:
-                    tmax_matrix = np.full(
-                        (total_years, np.size(zsmax, 0), np.size(zsmax, 1)), np.nan
-                    )
-                if include_tmax_zs == 1:
-                    tmax_zs_matrix = np.full(
-                        (total_years, np.size(zsmax, 0), np.size(zsmax, 1)), np.nan
-                    )
+                    ds_maxes[var] = var_out
 
-                Ns, nx, ny = np.shape(zsmax_matrix)
-
-                # Place files in the dictionary
-                zsmax_matrix[count_years, :, :] = zsmax
-                if include_qmax == 1:
-                    qmax_matrix[count_years, :, :] = qmax
-                if include_tmax == 1:
-                    tmax_matrix[count_years, :, :] = tmax
-                if include_tmax_zs == 1:
-                    tmax_zs_matrix[count_years, :, :] = tmax_zs
-                count_years = count_years + 1
-
-            # NaN out all points that there
-            id_delete = zsmax_matrix < -100
-            zsmax_matrix[id_delete] = np.nan
-            if include_qmax == 1:
-                qmax_matrix[id_delete] = np.nan
-            if include_tmax == 1:
-                tmax_matrix[id_delete] = np.nan
-            if include_tmax_zs == 1:
-                tmax_zs_matrix[id_delete] = np.nan
-
-            # TMP: determine maximum depth for different years
-            hhmax_matrix = zsmax_matrix - zb
-            hhmax = np.nanmax(hhmax_matrix, axis=1)
-            hhmax = np.nanmax(hhmax, axis=1)
-            non_nan_mask = np.isnan(hhmax)
-            indices = np.where(non_nan_mask)[0]
-
-            # Specify return period vector
-            Ns, nx, ny = np.shape(zsmax_matrix)
-
-            lambda_value = 1.0  # since we simulate individual years
-            r_axis = np.zeros(Ns)
-            for ii in range(1, Ns + 1):
-                r_axis[ii - 1] = (Ns + 1) / ((Ns + 1 - ii) * lambda_value)
-
-            # Prep output
-            zsmax_out = np.full(
-                (
-                    len(return_period_wanted),
-                    np.size(zsmax_matrix, 1),
-                    np.size(zsmax_matrix, 2),
-                ),
-                np.nan,
+            # --- Attributes---
+            ds_maxes["tzsmax"].attrs.update(
+                {
+                    "long_name": "Times of top POT exceedances for zsmax",
+                    "standard_name": "time",
+                }
             )
-            if include_qmax == 1:
-                qmax_out = np.full(
-                    (
-                        len(return_period_wanted),
-                        np.size(zsmax_matrix, 1),
-                        np.size(zsmax_matrix, 2),
-                    ),
-                    np.nan,
-                )
-            if include_tmax == 1:
-                tmax_out = np.full(
-                    (
-                        len(return_period_wanted),
-                        np.size(zsmax_matrix, 1),
-                        np.size(zsmax_matrix, 2),
-                    ),
-                    np.nan,
-                )
-            if include_tmax_zs == 1:
-                tmax_zs_out = np.full(
-                    (
-                        len(return_period_wanted),
-                        np.size(zsmax_matrix, 1),
-                        np.size(zsmax_matrix, 2),
-                    ),
-                    np.nan,
-                )
-            years_out = np.full(
-                (
-                    len(return_period_wanted),
-                    np.size(zsmax_matrix, 1),
-                    np.size(zsmax_matrix, 2),
-                ),
-                -999,
-                dtype="int64",
+            ds_maxes["zsmax"].attrs.update(
+                {
+                    "long_name": "Values of top POT exceedances for zsmax",
+                    "units": "m",
+                }
+            )
+            ds_maxes["zs_threshold"].attrs.update(
+                {
+                    "long_name": "POT threshold applied to zsmax per face",
+                    "units": "m",
+                }
+            )
+            ds_maxes.attrs.update(
+                {
+                    "title": "Peaks Over Threshold (POT) extremes per mesh face",
+                    "source": "Computed from ds['zsmax'] using pot_threshold_set_num_xr & get_extremes_pot_xr",
+                    "num_exceedances": num_exce,
+                    "declustering_r": r,
+                }
             )
 
-            # loop over the second and third dimensions
-            for i in range(zsmax_matrix.shape[1]):
-                for j in range(zsmax_matrix.shape[2]):
-                    # access the value at (i, j)
-                    zsmax = zsmax_matrix[:, i, j]
-                    if include_qmax == 1:
-                        qmax = qmax_matrix[:, i, j]
-                    if include_tmax == 1:
-                        tmax = tmax_matrix[:, i, j]
-                    if include_tmax_zs == 1:
-                        tmax_zs = tmax_zs_matrix[:, i, j]
+            # Export in case we want this for later.
+            ds_maxes.to_netcdf(
+                os.path.join(destout, county, TMP_string, "POT_Maxes.nc")
+            )
 
-                    # Count number of zeros
-                    num_non_nans = np.count_nonzero(~np.isnan(zsmax))
+            # ===============================================================================
+            # Get the specific return periods we want
+            # ===============================================================================
 
-                    # If we have more than 1 valid numbers we do this
-                    if num_non_nans > 0:
-                        # Is this a coastal point?
-                        if zb[i, j] < 0:
-                            a = 1
+            r_axis = rp_axis(num_exce, "weibull", "ascending")
 
-                        # Replace NaNs with 0 and zb
-                        zsmax[np.isnan(zsmax)] = zb[i, j]
-                        if include_qmax == 1:
-                            qmax[np.isnan(qmax)] = 0.0
-                        if include_tmax == 1:
-                            tmax[np.isnan(tmax)] = 0.0
-                        if include_tmax_zs == 1:
-                            tmax_zs[np.isnan(tmax_zs)] = 0.0
+            # Initialize  output
+            zsmax_out = np.full((num_grid, len(return_period_wanted)), np.nan)
 
-                        # Sort zsmax and find RPs we want
-                        ascending_indices = np.argsort(zsmax)
-                        zsmax_wanted = zsmax[ascending_indices]
-                        if include_qmax == 1:
-                            qmax_wanted = qmax[ascending_indices]
-                        if include_tmax == 1:
-                            # Option 1 => sorting the indices
+            tzsmax_out = np.full((num_grid, len(return_period_wanted)), np.nan)
+
+            if include_qmax:
+                qmax_out = np.full((num_grid, len(return_period_wanted)), np.nan)
+
+            if include_tmax:
+                tmax_out = np.full((num_grid, len(return_period_wanted)), np.nan)
+
+            # Run through the grid faces and find RP values
+            for station in range(num_grid):
+                if mask.sel(nmesh2d_face=station):
+                    ############ ZSMAX ############
+                    # Pull values for this station (and fix nans)
+                    zsmax = ds_maxes["zsmax"].sel(nmesh2d_face=station).values
+                    zsmax[np.isnan(zsmax)] = zb[station]
+
+                    # Sort zsmax and find RPs we want
+                    ascending_indices = np.argsort(zsmax)
+                    zsmax_wanted = zsmax[ascending_indices]
+
+                    # Find the indices for the return periods we want
+                    nearest_indices = np.full(
+                        len(return_period_wanted), -999, dtype="int64"
+                    )
+                    for cnt, rp in enumerate(return_period_wanted):
+                        idx = np.searchsorted(r_axis, rp, side="left")
+                        if idx == 0:
+                            nearest_idx = 0
+                        elif idx == len(r_axis):
+                            nearest_idx = len(r_axis) - 1
+                        else:
+                            prev_val = r_axis[idx - 1]
+                            next_val = r_axis[idx]
+                            if abs(rp - prev_val) <= abs(rp - next_val):
+                                nearest_idx = idx - 1
+                            else:
+                                nearest_idx = idx
+                        nearest_indices[cnt] = nearest_idx
+
+                    r_axis_found = r_axis[nearest_indices]
+
+                    # And now also interpolate with log
+                    log_r_axis = np.log10(r_axis)  # Take the logarithm of x-axis values
+                    log_r_axis[0] = 0.0  # Trick to get to yearly
+                    log_return_period_wanted = np.log10(
+                        return_period_wanted
+                    )  # Take the logarithm of the desired return period
+
+                    # Interpolate using log10 values
+                    interpolated_value = np.interp(
+                        log_return_period_wanted, log_r_axis, zsmax_wanted
+                    )
+                    zsmax_out[station, :] = interpolated_value
+
+                    ############ TZSMAX ############
+                    tzsmax = ds_maxes["tzsmax"].sel(nmesh2d_face=station).values
+                    tzsmax[np.isnan(tzsmax)] = np.datetime64("NaT")
+                    tzsmax_wanted = tzsmax[ascending_indices]
+                    tzsmax_out[station, :] = tzsmax_wanted[nearest_indices]
+
+                    ############ QMAX ############
+                    if include_qmax:
+                        qmax = ds_maxes["qmax"].sel(nmesh2d_face=station).values
+                        qmax[np.isnan(qmax)] = 0.0
+                        qmax_wanted = qmax[ascending_indices]
+                        qmax_out[station, :] = qmax_wanted[nearest_indices]
+
+                    ############ TMAX ############
+                    if include_tmax:
+                        tmax = ds_maxes["tmax"].sel(nmesh2d_face=station).values
+                        tmax[np.isnan(tmax)] = 0.0
+
+                        # Option 1 => sorting the indices
+                        tmax_wanted = tmax[ascending_indices]
+
+                        # Option 2 => cumulative sum
+                        if np.min(tmax) > 0:
+                            ascending_indices = np.argsort(tmax)
                             tmax_wanted = tmax[ascending_indices]
 
-                            # Option 2 => cumulative sum
-                            if np.min(tmax) > 0:
-                                ascending_indices = np.argsort(tmax)
-                                tmax_wanted = tmax[ascending_indices]
+                        # Option 1 => find the nearest value
+                        tmax_out[station, :] = tmax_wanted[nearest_indices]
 
-                        if include_tmax_zs == 1:
-                            tmax_zs_wanted = tmax_zs[ascending_indices]
+                        # Option 2 => average duration in hours for the return period
+                        # This means = the maximum that occurs on average once every 'rp' years
+                        num_samples = 1000  # Number of Monte Carlo samples
+                        for idx, rp in enumerate(return_period_wanted):
+                            # Check if this is not zero
+                            if np.max(tmax_wanted) > 0:
+                                # Generate all random samples at once for better performance
+                                sampled_indices = np.random.choice(
+                                    tmax_wanted.shape[0], (num_samples, rp)
+                                )
 
-                        # Find the indices for the return periods we want
-                        nearest_indices_old = np.searchsorted(
-                            r_axis, return_period_wanted
-                        )
-                        nearest_indices = np.full(
-                            len(return_period_wanted), -999, dtype="int64"
-                        )
-                        for cnt, rp in enumerate(return_period_wanted):
-                            idx = np.searchsorted(r_axis, rp, side="left")
-                            if idx == 0:
-                                nearest_idx = 0
-                            elif idx == len(r_axis):
-                                nearest_idx = len(r_axis) - 1
+                                # Gather the sampled tmax values
+                                sampled_tmax = tmax_wanted[
+                                    sampled_indices
+                                ]  # Shape: (num_samples, rp)
+
+                                # Compute the maximum for each sample (axis=1)
+                                sampled_max = np.nanmax(
+                                    sampled_tmax, axis=1
+                                )  # Shape: (num_samples,)
+
+                                # Compute the mean of the sampled maxima
+                                final_average = np.nanmean(sampled_max)
+
+                                # Store the result in hours
+                                tmax_out[station, idx] = (
+                                    final_average / 3600
+                                )  # Convert from seconds to hourseconds to hours
+
                             else:
-                                prev_val = r_axis[idx - 1]
-                                next_val = r_axis[idx]
-                                if abs(rp - prev_val) <= abs(rp - next_val):
-                                    nearest_idx = idx - 1
-                                else:
-                                    nearest_idx = idx
-                            nearest_indices[cnt] = nearest_idx
+                                tmax_out[station, :] = 0.0
 
-                        r_axis_found1 = r_axis[nearest_indices_old]
-                        r_axis_found2 = r_axis[nearest_indices]
+                    # Compute a hmax critera => nice to look at intermediate results
+                    hh_out = np.squeeze(zsmax_out[station, :]) - zb[station]
+                    idfind = np.where(hh_out < hh_criteria)
+                    zsmax_out[station, idfind] = np.nan
 
-                        # Save Output
-                        zsmax_out[:, i, j] = zsmax_wanted[nearest_indices]
-                        if include_qmax == 1:
-                            qmax_out[:, i, j] = qmax_wanted[nearest_indices]
-                        if include_tmax == 1:
-                            # Option 1 => find the nearest value
-                            tmax_out[:, i, j] = tmax_wanted[nearest_indices]
-
-                            # Option 2 => average duration in hours for the return period
-                            # This means = the maximum that occurs on average once every 'rp' years
-                            num_samples = 1000  # Number of Monte Carlo samples
-                            for idx, rp in enumerate(return_period_wanted):
-                                # Check if this is not zero
-                                if np.max(tmax_wanted) > 0:
-                                    # Generate all random samples at once for better performance
-                                    sampled_indices = np.random.choice(
-                                        tmax_wanted.shape[0], (num_samples, rp)
-                                    )
-
-                                    # Gather the sampled tmax values
-                                    sampled_tmax = tmax_wanted[
-                                        sampled_indices
-                                    ]  # Shape: (num_samples, rp)
-
-                                    # Compute the maximum for each sample (axis=1)
-                                    sampled_max = np.nanmax(
-                                        sampled_tmax, axis=1
-                                    )  # Shape: (num_samples,)
-
-                                    # Compute the mean of the sampled maxima
-                                    final_average = np.nanmean(sampled_max)
-
-                                    # Store the result in hours
-                                    tmax_out[idx, i, j] = (
-                                        final_average / 3600
-                                    )  # Convert from seconds to hourseconds to hours
-
-                                else:
-                                    tmax_out[:, i, j] = 0.0
-
-                        if include_tmax_zs == 1:
-                            tmax_zs_out[:, i, j] = tmax_zs_wanted[nearest_indices]
-
-                        # Pull out the years corresopnding to the pulled maximums
-                        sim_list = np.array(
-                            [int(file.replace("SY", "")) for file in files]
-                        )
-
-                        # Sort like all the other output parameters
-                        sim_list = sim_list[ascending_indices]
-
-                        # Need to back out the correct indices before sorting.
-                        years_out[:, i, j] = sim_list[nearest_indices]
-
-                        # And now also interpolate with log
-                        log_r_axis = np.log10(
-                            r_axis
-                        )  # Take the logarithm of x-axis values
-                        log_r_axis[0] = 0.0  # Trick to get to yearly
-                        log_return_period_wanted = np.log10(
-                            return_period_wanted
-                        )  # Take the logarithm of the desired return period
-
-                        # Interpolate using log10 values
-                        interpolated_value = np.interp(
-                            log_return_period_wanted, log_r_axis, zsmax_wanted
-                        )
-                        zsmax_out[:, i, j] = interpolated_value
-
-                        # Compute a hmax critera => nice to look at intermediate results
-                        hh_out = np.squeeze(zsmax_out[:, i, j]) - zb[i, j]
-                        idfind = np.where(hh_out < hh_criteria)
-                        zsmax_out[idfind, i, j] = np.nan
-                        if include_qmax == 1:
-                            qmax_out[idfind, i, j] = np.nan
-                        if include_tmax == 1:
-                            tmax_out[idfind, i, j] = np.nan
-                        if include_tmax_zs == 1:
-                            tmax_zs_out[idfind, i, j] = np.nan
-
-                        years_out[idfind, i, j] = -999
+                    if include_qmax == 1:
+                        qmax_out[station, idfind] = np.nan
+                    if include_tmax == 1:
+                        tmax_out[station, idfind] = np.nan
 
             # Done with this iteration (county and SLR): let's plot and save
             destout_TMP = os.path.join(destout, county, TMP_string)
             if not os.path.exists(destout_TMP):
                 os.makedirs(destout_TMP)
 
-            # Provide some feedback to on runtime
-            estimate_runtimes_in_hours = [
-                runtime / 3600 for runtime in estimate_runtimes
-            ]
-            plt.plot(estimate_runtimes_in_hours)
-            plt.xlabel("simulations")
-            plt.ylabel("run time [hr]")
-            fname = "estimate_runtimes"
-            fname = os.path.join(destout_TMP, fname)
-            plt.savefig(fname, dpi="figure", format=None)
-            plt.close()
-
-            # Store run times in general for all SLRs
-            matrix_runtimes[:, index] = estimate_runtimes_in_hours
-
             # Loop over return periods and make plots
-            for t in range(zsmax_out.shape[0]):
+            for t in range(zsmax_out.shape[1]):
                 # Make figure
                 fig, axs = plt.subplots(nrows=2, ncols=2, figsize=(10, 10))
 
                 # Water level
-                p1 = axs[0, 0].pcolor(
-                    x / 1000, y / 1000, np.squeeze(zsmax_out[t, :, :]), cmap="viridis"
+                p1 = axs[0, 0].scatter(
+                    xc / 1000,
+                    yc / 1000,
+                    20,
+                    np.squeeze(zsmax_out[:, t]),
+                    cmap="viridis",
                 )
                 axs[0, 0].set_title("Water level")
                 plt.colorbar(p1, ax=axs[0, 0])
 
                 # Flow velocity
                 if include_qmax == 1:
-                    p2 = axs[0, 1].pcolor(
-                        x / 1000, y / 1000, np.squeeze(qmax_out[t, :, :]), cmap="Reds"
+                    p2 = axs[0, 1].scatter(
+                        xc / 1000, yc / 1000, np.squeeze(qmax_out[:, t]), cmap="Reds"
                     )
                     axs[0, 1].set_title("Velocity")
                     plt.colorbar(p2, ax=axs[0, 1])
 
                     # Duration
                     if include_tmax == 1:
-                        p3 = axs[1, 0].pcolor(
-                            x / 1000,
-                            y / 1000,
-                            np.squeeze(tmax_out[t, :, :]),
+                        p3 = axs[1, 0].scatter(
+                            xc / 1000,
+                            yc / 1000,
+                            np.squeeze(tmax_out[:, t]),
                             cmap="GnBu",
                         )
                         axs[1, 0].set_title("Duration")
                         plt.colorbar(p3, ax=axs[1, 0])
 
                     # Bed level
-                    p4 = axs[1, 1].pcolor(
-                        x / 1000, y / 1000, zb, cmap="terrain", vmin=-20, vmax=20
+                    p4 = axs[1, 1].scatter(
+                        xc / 1000, yc / 1000, zb, cmap="terrain", vmin=-20, vmax=20
                     )
                     axs[1, 1].set_title("Bed level")
                     plt.colorbar(p4, ax=axs[1, 1])
@@ -657,9 +659,9 @@ for county in counties:
                     # Make one large figure for zsmax only
                     fig, axs = plt.subplots(nrows=1, ncols=1, figsize=(10, 10))
                     p1 = axs.pcolor(
-                        x / 1000,
-                        y / 1000,
-                        np.squeeze(zsmax_out[t, :, :]),
+                        xc / 1000,
+                        yc / 1000,
+                        np.squeeze(zsmax_out[:, t]),
                         cmap="viridis",
                     )
                     p1.set_clim(vmin=0, vmax=10)  # Set the color limits from 0 to 10
@@ -673,58 +675,69 @@ for county in counties:
                 # Create an xarray Dataset per return period
                 for t in range(zsmax_out.shape[0]):
                     # Get coordinates ready
-                    x_coord = x[1, :]
-                    y_coord = y[:, 1]
-                    zsmax_out_now = np.squeeze(zsmax_out[t, :, :])
+                    zsmax_out_now = np.squeeze(zsmax_out[:, t])
 
                     # Make base
-                    ds = xr.Dataset()
-                    coords = ("y", "x")
-                    ds["zsmax"] = (coords, np.float32(zsmax_out_now))
-                    if read_binary == 1:
-                        ds.coords["x"] = x_coord.squeeze()
-                        ds.coords["y"] = y_coord.squeeze()
-                    else:
-                        ds.coords["x"] = x_coord.compressed()
-                        ds.coords["y"] = y_coord.compressed()
+                    ds_out = xr.Dataset()
+                    coords = "nmesh2d_face"
+                    ds_out.coords["nmesh2d_face"] = ds["zsmax"].coords["nmesh2d_face"]
 
-                    # Get more description
-                    ds["zsmax"].attrs["units"] = "m"
-                    ds["zsmax"].attrs["standard_name"] = (
+                    ############ ZSMAX ############
+                    ds_out["zsmax"] = (coords, np.float32(zsmax_out_now))
+
+                    # Add more description
+                    ds_out["zsmax"].attrs["units"] = "m"
+                    ds_out["zsmax"].attrs["standard_name"] = (
                         "maximum of sea_surface_height_above_mean_sea_level"
                     )
-                    ds["zsmax"].attrs["long_name"] = "maximum_water_level"
-                    ds["zsmax"].attrs["coordinates"] = "y x"
+                    ds_out["zsmax"].attrs["long_name"] = "maximum_water_level"
+                    ds_out["zsmax"].attrs["coordinates"] = "nmesh2d_face"
+
+                    ds_out["tmax_zs"] = (coords, np.squeeze(tmax_zs_out[:, t]))
 
                     # Optionally add qmax and tmax if include_qmax and include_tmax are set to 1
-                    if include_qmax == 1:
+                    if include_qmax:
                         data_out_now = np.squeeze(qmax_out[t, :, :])
-                        ds["qmax"] = (coords, np.float32(data_out_now))
-                    if include_tmax == 1:
+                        ds_out["qmax"] = (coords, np.float32(data_out_now))
+
+                    if include_tmax:
                         data_out_now = np.squeeze(tmax_out[t, :, :])
-                        ds["tmax"] = (coords, np.float32(data_out_now))
-                    if include_tmax_zs == 1:
-                        data_out_now = np.squeeze(tmax_zs_out[t, :, :])
-                        ds["tmax_zs"] = (coords, np.float32(data_out_now))
+                        ds_out["tmax"] = (coords, np.float32(data_out_now))
 
-                    data_out_now = np.squeeze(years_out[t, :, :])
-                    id_bad = np.isnan(zsmax_out_now)
-                    data_out_now[id_bad] = -999
+                    # Also add bed level and coordinates
+                    ds_out["zb"] = (coords, np.float32(zb))
+                    ds_out["x"] = (coords, xc)
+                    ds_out["y"] = (coords, yc)
 
-                    ds["year_max"] = (coords, data_out_now)
-                    ds["year_max"].attrs["units"] = "Year (integer)"
-                    ds["year_max"].attrs["_FillValue"] = "-999"
-                    ds["year_max"].attrs["standard_name"] = (
-                        "Simulation Year RP occurs (With file header removed)"
+                    ds_out["zb"].attrs["units"] = "m"
+                    ds_out["zb"].attrs["standard_name"] = "Bed_level"
+                    ds_out["zb"].attrs["datum"] = "NAVD88"
+
+                    ds_out["x"].attrs["units"] = "m"
+                    ds_out["x"].attrs["standard_name"] = "projection_x_coordinate"
+                    ds_out["x"].attrs["long_name"] = "x coordinate of projection"
+                    ds_out["x"].attrs["Projection"] = "UTM zone 10N"
+
+                    ds_out["y"].attrs["units"] = "m"
+                    ds_out["y"].attrs["standard_name"] = "projection_y_coordinate"
+                    ds_out["y"].attrs["long_name"] = "y coordinate of projection"
+                    ds_out["y"].attrs["Projection"] = "UTM zone 10N"
+
+                    ############ TZSMAX ############
+                    ds_out["tmax_zs"] = (coords, np.squeeze(tmax_zs_out[:, t]))
+                    ds_out["tmax_zs"].attrs["units"] = "date"
+                    ds_out["tmax_zs"].attrs["standard_name"] = (
+                        "time_of_maximum_sea_surface_height_above_mean_sea_level"
                     )
-                    ds["year_max"].attrs["coordinates"] = "y x"
-
-                    # Also add bed level
-                    ds["zb"] = (coords, np.float32(zb))
+                    ds_out["tmax_zs"].attrs["Description"] = (
+                        "Spatial time of occurence (to the day) of Return interval maximum water level"
+                    )
 
                     # Add global attributes
-                    ds.attrs["description"] = "NetCDF file with process SFINCS outputs"
-                    ds.attrs["history"] = "Created " + datetime.now().strftime(
+                    ds_out.attrs["description"] = (
+                        "NetCDF file with process SFINCS outputs"
+                    )
+                    ds_out.attrs["history"] = "Created " + datetime.now().strftime(
                         "%Y-%m-%d %H:%M:%S"
                     )
 
@@ -735,27 +748,23 @@ for county in counties:
                         + ".nc"
                     )
                     filename = os.path.join(destout_TMP, filename)
-                    ds.to_netcdf(filename)
+                    ds_out.to_netcdf(filename)
 
                     # Additionally write simple wet-dry interface
-                    zsmax_out_now = np.squeeze(zsmax_out[t, :, :])
+                    zsmax_out_now = np.squeeze(zsmax_out[:, t])
                     wet_dry = np.where(np.isnan(zsmax_out_now), 0, 1)
-                    ds = xr.Dataset()
-                    coords = ("y", "x")
-                    if read_binary == 1:
-                        ds.coords["x"] = x_coord.squeeze()
-                        ds.coords["y"] = y_coord.squeeze()
-                    else:
-                        ds.coords["x"] = x_coord.compressed()
-                        ds.coords["y"] = y_coord.compressed()
-                    ds["wetdry"] = (coords, np.float32(wet_dry))
+                    ds_out = xr.Dataset()
+                    coords = "nmesh2d_face"
+                    ds_out.coords["nmesh2d_face"] = ds["zsmax"].coords["nmesh2d_face"]
+
+                    ds_out["wetdry"] = (coords, np.float32(wet_dry))
                     filename = (
                         "wetdry_SFINCS_output_RP"
                         + "{:03}".format(int(return_period_wanted[t]))
                         + ".nc"
                     )
                     filename = os.path.join(destout_TMP, filename)
-                    ds.to_netcdf(filename)
+                    ds_out.to_netcdf(filename)
 
             # handle the exception if the file cannot be read
             print(f"done with this iteration - {destout_TMP}", flush=True)

@@ -1,6 +1,6 @@
 import numpy as np
 import xarray as xr
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Literal
 
 # ----------------------------
 # Utilities
@@ -484,3 +484,84 @@ def pot_threshold_set_num_map(
     # Name and attrs
     thresh.name = (da.name or "var") + "_threshold"
     return thresh
+
+
+
+def rp_axis(
+    n: int,
+    plotting: Literal["weibull", "gringorten"] = "weibull",
+    order: Literal["ascending", "descending"] = "descending",
+) -> np.ndarray:
+    """
+    Generate a return-period (T) axis for ranked data using standard plotting-position formulas.
+
+    The rank `m` is defined as `m = 1` for the **largest** observation (descending order).
+    For a dataset of size `n`, two plotting-position formulas are supported:
+
+    - **Weibull**:    T = (n + 1) / m
+    - **Gringorten**: T = (n - 0.12) / (m - 0.44)
+
+    These expressions yield `T` that **decreases** as rank `m` increases (i.e., `T` is monotonic
+    decreasing when `m` goes from 1 → n). Use `order="ascending"` to return the axis in increasing
+    order (smallest to largest), which can be convenient for axes that grow left-to-right.
+
+    Parameters
+    ----------
+    n : int
+        Sample size. Must be a positive integer (`n >= 1`).
+    plotting : {"weibull", "gringorten"}, optional
+        Plotting-position formula to use. Defaults to "weibull".
+        - "weibull":    T = (n + 1) / m
+        - "gringorten": T = (n - 0.12) / (m - 0.44)
+    order : {"ascending", "descending"}, optional
+        Desired sort/order of the returned `T` array.
+        - "descending" (default): Returns `T` aligned with `m = 1..n` (i.e., decreasing with rank).
+        - "ascending":  Returns `T` in increasing order (smallest to largest), by reversing the
+          default decreasing sequence.
+
+    Returns
+    -------
+    np.ndarray
+        Array of length `n` containing the return periods `T` as floats.
+
+    Notes
+    -----
+    - The rank convention here is `m = 1` for the **largest** observation (descending order).
+    - For "gringorten", `(m - 0.44)` is always positive for integer ranks `m >= 1`, so there are
+      no division-by-zero issues.
+    - When `order="ascending"`, the result is simply the reverse of the default (descending) sequence.
+
+    Examples
+    --------
+    >>> rp_axis(5, plotting="weibull", order="descending")
+    array([6. , 3. , 2. , 1.5, 1.2])
+
+    >>> rp_axis(5, plotting="weibull", order="ascending")
+    array([1.2, 1.5, 2. , 3. , 6. ])
+
+    >>> rp_axis(5, plotting="gringorten", order="ascending")
+    array([1.145..., 1.428..., 1.667..., 1.909..., 2.182...])
+    """
+    # --- input validation ---
+    if not isinstance(n, int) or n <= 0:
+        raise ValueError("n must be a positive integer (n >= 1).")
+    if plotting not in ("weibull", "gringorten"):
+        raise ValueError("plotting must be 'weibull' or 'gringorten'.")
+    if order not in ("ascending", "descending"):
+        raise ValueError("order must be 'ascending' or 'descending'.")
+
+    # --- ranks: m = 1 is the largest (descending order) ---
+    m = np.arange(1, n + 1, dtype=float)
+
+    # --- compute T according to the chosen plotting position ---
+    if plotting == "weibull":
+        T = (n + 1.0) / m
+    else:  # plotting == "gringorten"
+        T = (n - 0.12) / (m - 0.44)
+
+    # --- return in requested order ---
+    if order == "ascending":
+        # T is monotonic decreasing with m; reverse to get ascending
+        T = T[::-1]
+
+    return T
