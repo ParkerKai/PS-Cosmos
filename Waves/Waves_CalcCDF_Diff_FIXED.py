@@ -41,7 +41,7 @@ dir_out = r"Y:\PS_Cosmos\02_models\Wave_LUT\LUT_timeSeries"  # Fixed after to sh
 # Model to process
 Mod_list = ["CMCC", "CNRM", "EcEarth", "GFDL", "HadGemHH", "HadGemHM", "HadGemHMsst"]
 
-SLR_list = ["000", "025", "050", "100", "150","200", "300"]  # "000", "025", "050", "100", "150",
+SLR_list = [ "000", "025", "050", "100", "150","200", "300"]  # "000", "025", "050", "100", "150","200", "300"
 # SLR = '000'
 
 county_list = [
@@ -58,7 +58,7 @@ county_list = [
     "SanJuan",
 ]
 
-county_list = ["Clallam"]  # Jefferson IslandCounty
+county_list = ["Jefferson"]  # Jefferson IslandCounty
 
 # ===============================================================================
 # %% Define some functions
