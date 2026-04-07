@@ -56,6 +56,7 @@ county_list = [
     "Whatcom",
     "Mason",
     "SanJuan",
+    'Clallam',
 ]
 
 county_list = ["Jefferson"]  # Jefferson IslandCounty

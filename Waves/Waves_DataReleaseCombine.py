@@ -28,7 +28,7 @@ import pandas as pd
 import re
 from datetime import datetime
 from dask.distributed import Client, LocalCluster
-
+import numpy as np 
 
 # ===============================================================================
 # %% Functions
@@ -44,40 +44,43 @@ def normalize(s):
 
 def main():
     # ===============================================================================
-    # %% User Defined inputs
+    # User Defined inputs
     # ===============================================================================
-    SLR = "000"
+    SLR = "025"
 
     # COUNTIES
     county_list = [
-        "SanJuan",
-    ]  #
-        # "Kitsap",
-        # "Clallam",
-        # "Snohomish",
-        # "IslandCounty",
-        # "Skagit",
-        # "Jefferson",
-        # "King",
-        # "Pierce",
-        # "Thurston",
-        # "Whatcom",
-        # "Mason",
+    "Kitsap",
+    "Snohomish",
+    "IslandCounty",
+    "Skagit",
+    "Jefferson",
+    "King",
+    "Pierce",
+    "Thurston",
+    "Whatcom",
+    "Mason",
+    "Clallam",
+    "SanJuan"
+ ]   #  
+
+        
 
     dir_in = r"Y:\PS_Cosmos\02_models\Wave_LUT\LUT_timeSeries"
     dir_out = r"C:\Temp"
 
     # Number of cpus to put into the cluster.
     # n = os.cpu_count() or 1
-    n = 4
+    n = 6
 
     # Packing information
 
     PACK_SCALE = 1e-4  # meters per integer count (i.e., meters * 1e4)
     FILL_INT = -9999
-
+    FILL_FLOAT = np.float32(-9999.0)  
+    
     # ===============================================================================
-    # %% Parallelize with Dask
+    # Parallelize with Dask
     # ===============================================================================
     print("starting Dask Cluster")
 
@@ -108,7 +111,7 @@ def main():
     print("Workers:", client.scheduler_info().get("workers", {}).keys())
 
     # ===============================================================================
-    # %% Load the data
+    # Load the data
     # ===============================================================================
 
     # Load the data
@@ -139,7 +142,7 @@ def main():
         ds = ds.rename_vars({'cmip_diff':'hs_CmipDiff'})
         
         # ===============================================================================
-        # %% Process and convert to new dataset
+        # Process and convert to new dataset
         # ===============================================================================
 
         # Create a new dataset to hold the data
@@ -160,35 +163,40 @@ def main():
       
         ds["Hs"].attrs = {
             "long_name": "Significant Wave Height",
-            "desc": "Hs for reanalysis periods",
+            "description": "Hs for ERA5 reanalysis periods",
             "units": "meters",
             "precision": "Data encoded as integer with 4 significant digits",
+            'note':	'Variable scaled with scale_factor . Check if applied correctly by your software',
         }
 
         ds["Dm"].attrs = {
             "long_name": "Mean wave direction",
-            "desc": "Dm for reanalysis period",
+            "description": "Dm for ERA5 reanalysis period",
             "units": "degrees",
             "precision": "Data encoded as integer with 4 significant digits",
+            'note':	'Variable scaled with scale_factor. Check if applied correctly by your software',
+            'reference':	'Degrees from True North.'
         }
 
         ds["Tm"].attrs = {
             "long_name": "Mean Wave Period ",
-            "desc": "Tm for reanalysis period",
+            "description": "Tm for ERA5 reanalysis period",
             "units": "seconds",
             "precision": "Data encoded as integer with 4 significant digits",
+            'note':	'Variable scaled with scale_factor. Check if applied correctly by your software',
+
         }
 
         ds["lon"].attrs = {
-            "standard_name ": "longitude",
+            "standard_name": "longitude",
             "long_name": "x-coordinate of station",
             "projection": "WGS 84",
             "epsg": "4326",
-            "units": "degree_east",
+            "units": "degrees_east",
         }
 
         ds["lat"].attrs = {
-            "standard_name ": "latitude",
+            "standard_name": "latitude",
             "long_name": "y-coordinate of station",
             "projection": "WGS 84",
             "epsg": "4326",
@@ -196,25 +204,30 @@ def main():
         }
 
         ds["hs_quants"].attrs = {
-            "units": "None",
-            "long_name": "Significant Wave Height Quantile (Monthly)",
-            "desc": "Quantiles (computed for each month) for all data in timeseries within specific month",
-            "note": "Variable scaled with _ScaleFactor. Check if applied correctly by your software",
+            "units": "1",
+            "long_name": "Significant Wave Height Quantile (Computed by Month)",
+            "description": "'Quantiles are computed within each month of entire timeseries; for example, all data within every December in the timeseries is used to generate December-quantiles",
+            "note": "Variable scaled with scale_factor. Check if applied correctly by your software",
             "precision": "Data encoded as integer with 4 significant digits",
         }
         
         ds["hs_CmipDiff"].attrs = {
             "long_name": "CMIP6 difference in Significant Wave Height",
             "units": "meters",
-            "desc": "Predicted change by CMIP6 model for each ERA5 wave height value",
-            "note": "Variable scaled with _ScaleFactor. Check if applied correctly by your software",
+            "description": "Predicted change from specified CMIP6 source for each reanalysis (ERA5) wave height value",
+            "note": "Variable scaled with scale_factor. Check if applied correctly by your software",
             "precision": "Data encoded as integer with 4 significant digits",
         }
         
         
         # SEt some attributes to the varialbes
-        ds["cmip6"].attrs = {"long_name": "Cmip6 Model (HighResMIP)"}
-
+        ds["cmip6"].attrs = {"long_name": "Cmip6 Model (HighResMIP)",
+                             'description': "Source model for projected wave height difference"}
+        
+        ds["station"].attrs = {'long_name': "station name"}
+        
+        ds["cmip6"].attrs = {"long_name": "Cmip6 Model (HighResMIP)",
+                             'description': "Source model for projected wave height difference"}
         # Global Attributes
         ds.attrs["processing_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ds.attrs["author"] = "Kai Parker (USGS PCMSC)"
@@ -222,11 +235,13 @@ def main():
             "This dataset contains modelled bulk wave parameters modeled using a wave lookup table and linear swell propogation for the reanalysis period."
             "Modelled changes to the reanalysis timeseries (as predicted by CMIP6) are also included. Output is for stations in the Salish Sea"        )
         ds.attrs["DataReleaseCitation"] = "XXXXXX"
-        ds.attrs["ModelCitation (note change in forcing)"] = "XXXXX"
+        ds.attrs["ModelCitation"] = "XXXXX"
         ds.attrs["InterpretiveProductCitation"] = "XXXXXX"
-
+        del ds.attrs['ProducedBy']
+        del ds.attrs['DataSource']
+        
         # ===============================================================================
-        # %% Output
+        # Output
         # ===============================================================================
         # Loop through each county and output a netcdf file for each county with the data from the stations within that county.
 
@@ -247,14 +262,16 @@ def main():
             dtype= "float32",
             zlib= True,
             shuffle= True,
-            complevel= 5)
+            complevel= 5,
+            _FillValue=FILL_FLOAT,
+)
         
 
         print("Outputting data...")
 
         # Output the dataset for this county
         ds.to_netcdf(
-            os.path.join(dir_out, f"Reanalysis_and_Projected_CoSMoSwaves_{county}.nc"),
+            os.path.join(dir_out,SLR, f"Reanalysis_and_Projected_CoSMoSwaves_{county}_sealevel{SLR}m.nc"),
             engine="netcdf4",
             encoding={
                 "Hs": int_encoding,
@@ -268,7 +285,7 @@ def main():
         )
 
     # ===============================================================================
-    # %% Cluster shutdown and cleanup
+    # Cluster shutdown and cleanup
     # ===============================================================================
 
     client.close()
