@@ -1,10 +1,20 @@
-# Python script to read and process SFINCS netcdf outputs
-# v0.1  Nederhoff   2023-03-07
-# v0.3  Nederhoff   2023-11-24
+"""
+Created on Tue Feb 13 11:37:51 2024
+Python script to read and process SFINCS netcdf outputs
+v0.1  Nederhoff   2023-03-07
+v0.3  Nederhoff   2023-11-24
 
+@author: kaparker
+    USGS: PCMSC
+   kaparker@usgs.gov
+"""
 
+__author__ = "Kai Parker"
+__email__ = "kaparker@usgs.gov"
 
-# Modules needed
+# ===============================================================================
+# Import Modules
+# ===============================================================================
 import numpy as np
 import rasterio
 import rasterio.mask
@@ -15,6 +25,7 @@ import os
 import fiona
 
 destin = r"C:\Users\kai\Documents\KaiRuns"
+
 # ---------------------------------------------
 # SETTINGS
 # ---------------------------------------------
@@ -39,6 +50,10 @@ dest_DEM = r"C:\Users\kai\Documents\KaiRuns\Dem_AddWeir_20241127"
 dir_shoreline = r"C:\Users\kai\Documents\KaiRuns\shapefiles"
 dir_clipping = r"C:\Users\kai\Documents\KaiRuns\shapefiles\CountyClippingPolygons"
 
+
+# ===============================================================================
+# Functions
+# ===============================================================================
 
 def delete_file(file):
     """
@@ -70,6 +85,10 @@ def delete_file(file):
 
 
 
+
+# ===============================================================================
+# Preprocessing
+# ===============================================================================
 
 # Some processing of the inputs
 sub_categories = [sub.replace("_median", "") for sub in sub_categories]

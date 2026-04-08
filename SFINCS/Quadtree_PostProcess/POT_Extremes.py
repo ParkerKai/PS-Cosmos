@@ -260,8 +260,16 @@ def pot_threshold_set_num_xr(
     vals = values[np.isfinite(values)]
     if vals.size == 0:
         raise ValueError("Input contains no finite values.")
-    unique_vals = np.unique(vals)
+    unique_vals = vals
     unique_vals.sort()  # ascending
+
+
+    # --- Edge case: only a single unique value ---
+    # Return a threshold *just below* the unique value so that strict ">" finds exceedances.
+    if np.unique(unique_vals).size == 1:
+        u = float(np.unique(unique_vals)[0])
+        print(f"Warning: Only one unique finite value {u} found. Returning threshold just below it.")
+        return float(np.nextafter(u, -np.inf))
 
     # Helper: count peaks at a data threshold
     def count_at(i: int) -> int:
@@ -400,8 +408,18 @@ def pot_threshold_set_num_map(
         vals = values_1d[np.isfinite(values_1d)]
         if vals.size == 0:
             return np.nan
-        unique_vals = np.unique(vals)
+        unique_vals = vals
         unique_vals.sort()
+
+
+    
+        # --- Edge case: only a single unique value ---
+        # Return a threshold *just below* the unique value so that strict ">" finds exceedances.
+        if np.unique(unique_vals).size == 1:
+            u = float(np.unique(unique_vals)[0])
+            print(f"Warning: Only one unique finite value {u} found. Returning threshold just below it.")
+            return float(np.nextafter(u, -np.inf))
+
 
         def count_at(i: int) -> int:
             return _count_peaks_1d(values_1d, t, float(unique_vals[i]), r_ns)

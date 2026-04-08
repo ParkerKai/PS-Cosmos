@@ -330,8 +330,13 @@ for county in counties:
             # Preallocate outputs
             exceedance = np.arange(num_exce)
 
+            
             tzsmax_out = xr.DataArray(
-                np.full((nfaces, num_exce), np.datetime64("NaT")),
+                np.full(
+                    (nfaces, num_exce),
+                    np.datetime64("NaT", "ns"),
+                    dtype="datetime64[ns]"
+                ),
                 dims=("nmesh2d_face", "exceedance"),
                 coords={"nmesh2d_face": faces, "exceedance": exceedance},
                 name="tzsmax",
@@ -372,16 +377,23 @@ for county in counties:
                         pull, th, r=r, time_dim="timemax", num_exce=num_exce
                     )
 
-                    # k = number of extremes found (could be < num_exce)
-                    k = min(num_exce, extremes.sizes.get("timemax", num_exce))
+                                        
+                    # 3) Write exactly num_exce entries (pad with NaN/NaT if fewer available)
+                    k = extremes.sizes.get("timemax", 0)
 
-                    # Assign time + value into 2D arrays
-                    tzsmax_out.loc[
-                        dict(nmesh2d_face=station, exceedance=slice(0, k))
-                    ] = extremes["timemax"].values[:k]
-                    zsmax_out.loc[
-                        dict(nmesh2d_face=station, exceedance=slice(0, k))
-                    ] = extremes.values[:k]
+                    if k < num_exce:
+                        pad_times = np.full(num_exce - k, np.datetime64("NaT"))
+                        pad_vals = np.full(num_exce - k, np.nan)
+
+                        times_full = np.concatenate([extremes["timemax"].values, pad_times])
+                        vals_full = np.concatenate([extremes.values, pad_vals])
+                    else:
+                        times_full = extremes["timemax"].values[:num_exce]
+                        vals_full = extremes.values[:num_exce]
+
+                    tzsmax_out.loc[dict(nmesh2d_face=station, exceedance=slice(0, num_exce))] = times_full
+                    zsmax_out.loc[dict(nmesh2d_face=station, exceedance=slice(0, num_exce))] = vals_full
+
 
             # --- Build Dataset ---
             ds_maxes = xr.Dataset(
@@ -396,7 +408,7 @@ for county in counties:
                 },
             )
 
-            # --- dd other variables at the same exceedance times ---
+            # Other variables at the same exceedance times
             # We want values of other variables at the POT times for each face.
             if len(vars_to_keep) > 1:
                 for var in vars_to_keep[1:]:

@@ -1,3 +1,18 @@
+"""
+Created on Tue Feb 13 11:37:51 2024
+Python script to read and process SFINCS netcdf outputs
+
+@author: kaparker
+    USGS: PCMSC
+   kaparker@usgs.gov
+"""
+
+__author__ = "Kai Parker"
+__email__ = "kaparker@usgs.gov"
+
+# ===============================================================================
+# Import Modules
+# ===============================================================================
 # Modules => runs on hydromt-sfincs-dev
 import numpy as np
 from scipy import ndimage as ndi
@@ -9,6 +24,11 @@ from shapely.geometry import box
 from rasterio import features
 import time
 from os.path import join
+
+
+# ===============================================================================
+# User inputs
+# ===============================================================================
 
 destin_main             =  r'C:\Users\kai\Documents\KaiRuns'
 RPs                     =['1', '2', '5', '10', '20', '50', '100']
@@ -33,9 +53,11 @@ include_qmax    = 1
 include_tmax    = 1
 include_tmax_zs = 1
 
-# Loop over counties
-for index, county in enumerate(counties):
 
+# ===============================================================================
+# Loop over Counties
+# ===============================================================================
+for index, county in enumerate(counties):
     # Loop over SLRs
     for slr in SLRs:
         

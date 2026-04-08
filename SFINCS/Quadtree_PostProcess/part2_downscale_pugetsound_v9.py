@@ -1,4 +1,19 @@
-# Load modules
+"""
+Created on Tue Feb 13 11:37:51 2024
+Python script to read and process SFINCS netcdf outputs
+
+@author: kaparker
+    USGS: PCMSC
+   kaparker@usgs.gov
+"""
+
+__author__ = "Kai Parker"
+__email__ = "kaparker@usgs.gov"
+
+# ===============================================================================
+# Import Modules
+# ===============================================================================
+
 import os
 from os.path import join
 os.environ['USE_PYGEOS'] = '0'
@@ -10,6 +25,11 @@ import time
 import rasterio
 import scipy.ndimage as ndimage
 import fiona
+
+
+# ===============================================================================
+# User inputs
+# ===============================================================================
 
 destin_main             =  r'C:\Users\kai\Documents\KaiRuns'
 RPs                     =['1', '2', '5', '10', '20', '50', '100']
@@ -39,7 +59,10 @@ include_qmax    = 1
 include_tmax    = 1
 include_tmax_zs = 1
 
-# Loop over counties
+
+# ===============================================================================
+# Loop over Counties
+# ===============================================================================
 for index, county in enumerate(counties):
     
     if clipping:
