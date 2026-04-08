@@ -16,9 +16,11 @@ For WFLOW model runs
 __author__ = "Kai Parker"
 __email__ = "kaparker@usgs.gov"
 
-#===============================================================================
-# Import Modules
-#===============================================================================
+
+# ------------------------------------------------------------------------------
+# Import libraries
+# ------------------------------------------------------------------------------
+
 import os
 import numpy as np
 import xarray as xr
@@ -26,79 +28,111 @@ import pandas as pd
 from dask.distributed import Client, LocalCluster
 import dask
 
-#===============================================================================
-# Define some functions
-#===============================================================================
+# ------------------------------------------------------------------------------
+# Functions
+# ------------------------------------------------------------------------------
 
-@dask.delayed()
-def emp_cdf_xr(data,stat):
-    import scipy
-    
+def _ensure_numpy(arr):
+    """Return a NumPy array from a NumPy or Dask array without loading early."""
+    # If this is a Dask collection, compute here (inside the worker)
+    if hasattr(arr, "compute"):
+        arr = arr.compute()
+    return np.asarray(arr)
+
+@dask.delayed  # <- no parentheses
+def emp_cdf_xr(values, stat):
+    """
+    Compute empirical CDF for a 1D array of values for a single station.
+
+    Returns a Pandas DataFrame with columns: values, cdf, stat.
+    """
+    # Convert to NumPy on the worker (if dask array)
+    data = _ensure_numpy(values)
+
+    # Drop NaNs
     data = data[~np.isnan(data)]
+    if data.size == 0:
+        return pd.DataFrame({"values": [], "cdf": [], "stat": []})
 
-    # Calculate the ecdf
-    res = scipy.stats.ecdf(data)
-    
-    data_out = pd.DataFrame(data = {'values': res.cdf.quantiles,
-                               'cdf': res.cdf.probabilities,
-                               'stat': stat*np.ones((len(res.cdf.quantiles),), dtype=int)})
-    
-    return data_out
+    # SciPy ECDF (SciPy >= 1.11). If not available, fallback to statsmodels.
+    try:
+        import scipy
+        from scipy import stats
+        # sanity check version
+        try:
+            from packaging.version import parse as V
+            if V(scipy.__version__) < V("1.11"):
+                raise ImportError("scipy.stats.ecdf requires SciPy >= 1.11")
+        except Exception:
+            # If packaging not installed, just attempt and let ImportError bubble
+            pass
 
-def emp_cdf(data,var):
-    import pandas as pd
-    import dask 
-    
-    # data: Xarray dataset
-    # var: variable to calculate the cdf for 
-    
-    # Load the xarray data into memory
-    cdf  = []
-    
-    for stat in range(data.dims['Q_contour_gauges_contour']):   
-        print('processing Station: {}'.format(stat))
-        # pull data at this station
-        vals = dask.delayed(data[var].isel(Q_contour_gauges_contour=stat).values)
-        
-        # Calculate the cdf 
-        
-        cdf.append(emp_cdf_xr(vals,stat))
-        
-        
-    delayed_results = dask.delayed(pd.concat)(cdf)
-    # if stat == 0:
-    #     delayed_results.visualize(filename=os.path.join(dir_out,'TaskGraph.svg'), optimize_graph=True)
-    
-    out = dask.compute(delayed_results)
-    
-    return out 
+        res = stats.ecdf(data)  # returns ECDFResult with cdf/sf
+        df = pd.DataFrame(
+            {
+                "values": res.cdf.quantiles,
+                "cdf": res.cdf.probabilities,
+                "stat": np.full(len(res.cdf.quantiles), stat, dtype=int),
+            }
+        )
+        return df
+    except Exception:
+        # Fallback: statsmodels ECDF for older SciPy environments
+        from statsmodels.distributions.empirical_distribution import ECDF
+        ecdf = ECDF(data)
+        # ECDF exposes step locations via ecdf.x and ECDF values via ecdf.y
+        df = pd.DataFrame(
+            {
+                "values": ecdf.x,
+                "cdf": ecdf.y,
+                "stat": np.full(len(ecdf.x), stat, dtype=int),
+            }
+        )
+        return df
 
+def emp_cdf(ds, var, station_dim):
+    """
+    Compute ECDF for each station in `station_dim` for DataArray `var` in Dataset `ds`.
 
-def monthly_CDF(data,var,month):
-    data_month = data.sel(time=data.time.dt.month.isin(month)) 
-    
-    cdf_month = emp_cdf(data_month,var)
+    Returns a single Pandas DataFrame (concatenated over stations).
+    """
+    delayed_frames = []
+    nstations = ds[var].sizes[station_dim]
 
-    return cdf_month 
+    for stat in range(nstations):
+        print(f"processing Station: {stat}")
+        # Grab the values lazily (keep as Dask-backed if chunked)
+        values = ds[var].isel({station_dim: stat}).data  # don't call .values here
+        delayed_frames.append(emp_cdf_xr(values, stat))
 
+    # Concatenate results (still delayed)
+    delayed_concat = dask.delayed(pd.concat)(delayed_frames, ignore_index=True)
 
-def main():    
-   
+    # Compute once (returns the concrete DataFrame)
+    return dask.compute(delayed_concat)[0]
 
-    #===============================================================================
-    #  User Defined inputs
-    #===============================================================================
-    
-    # Directory where the WFLOW data resides
-    #dir_in = r'D:\DFM'
-    dir_in = r'Y:\PS_Cosmos\02_models\WFLOW\11_20_2025_Discharges_SnohomishKitsap'
-    dir_out = r'Y:\PS_Cosmos\02_models\WFLOW\11_20_2025_Discharges_SnohomishKitsap'
+def monthly_CDF(ds, var, station_dim, month):
+    """
+    Filter dataset by calendar month and compute ECDFs.
+    """
+    # `.isin(month)` expects list-like; equality is simpler for a single month.
+    ds_month = ds.sel(time=ds.time.dt.month == month)
+    return emp_cdf(ds_month, var, station_dim)
 
-    # model grid to process (county)
-    cnty = 'kitsap'
+# ------------------------------------------------------------------------------
+# Main
+# ------------------------------------------------------------------------------
 
-    # Number of workers
-    n = 6
+def main():
+    # -----------------------------
+    # User inputs
+    # -----------------------------
+    dir_in = r'D:\wflow\11_20_2025_Discharges_SnohomishKitsap'
+    dir_out = r'D:\wflow\11_20_2025_Discharges_SnohomishKitsap'
+    cnty = 'snohomish'
+    var = 'Q_contour'
+    station_dim = 'Q_contour_gauges_contour'  # adjust if your variable uses a different name
+    n_workers = 6
 
     # -----------------------------
     # Dask cluster
@@ -109,31 +143,35 @@ def main():
     os.environ.setdefault("OMP_NUM_THREADS", "1")
 
     cluster = LocalCluster(
-        n_workers=n,
-        threads_per_worker=1,
+        n_workers=n_workers,
+        threads_per_worker=1,  # good when using SciPy/NumPy
         processes=True,
         silence_logs=False,
     )
     client = Client(cluster)
-
+    client.wait_for_workers(n_workers)
     print("Dashboard:", cluster.dashboard_link)
-    print("Workers:", client.scheduler_info().get("workers", {}).keys())
+    print("Workers:", list(client.scheduler_info().get("workers", {}).keys()))
 
-    #===============================================================================
-    # Load the data 
-    #===============================================================================
-    # ERA5 Forced data 
-    files = os.path.join(dir_in,cnty,'era5_3hourly','output_scalar.nc')
+    # -----------------------------
+    # Load data (single file)
+    # -----------------------------
+    fn = os.path.join(dir_in, cnty, 'era5_3hourly', 'output_scalar.nc')
 
-    ds_cmip = xr.open_mfdataset(files, engine='h5netcdf', parallel=True)
+    # Use open_dataset for a single file; give chunks to benefit from Dask laziness
+    ds = xr.open_dataset(fn, engine='h5netcdf', chunks={'time': 1000})
 
-    # split by month
-    for month in np.arange(1, 13, 1, dtype=int):
-        print('Processing Month: {}'.format(month))
-        
-        cdf_month = monthly_CDF(ds_cmip,'Q_contour',month)[0]
-        
-        cdf_month.to_pickle(os.path.join(dir_out,cnty,'era5_3hourly','CDFmonthly_{0:02d}.pkl'.format(month)))
+    # -----------------------------
+    # Compute monthly ECDFs
+    # -----------------------------
+    os.makedirs(os.path.join(dir_out, cnty, 'era5_3hourly'), exist_ok=True)
+
+    for month in range(1, 13):
+        print(f'Processing Month: {month:02d}')
+        cdf_month = monthly_CDF(ds, var, station_dim, month)
+        out_fn = os.path.join(dir_out, cnty, 'era5_3hourly', f'CDFmonthly_{month:02d}.pkl')
+        cdf_month.to_pickle(out_fn)
+        print(f'Wrote: {out_fn}')
 
 if __name__ == '__main__':
     main()

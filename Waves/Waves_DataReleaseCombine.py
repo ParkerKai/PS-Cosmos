@@ -28,7 +28,7 @@ import pandas as pd
 import re
 from datetime import datetime
 from dask.distributed import Client, LocalCluster
-import numpy as np 
+import numpy as np
 
 # ===============================================================================
 # %% Functions
@@ -50,23 +50,20 @@ def main():
 
     # COUNTIES
     county_list = [
- 
-    "SanJuan"
- ]   #  
+        "Kitsap",
+        "Snohomish",
+        "IslandCounty",
+        "Skagit",
+        "Jefferson",
+        "King",
+        "Pierce",
+        "Thurston",
+        "Whatcom",
+        "Mason",
+        "Clallam",
+        "SanJuan",
+    ]  #
 
-        
-   # "Kitsap",
-    # "Snohomish",
-    # "IslandCounty",
-    # "Skagit",
-    # "Jefferson",
-    # "King",
-    # "Pierce",
-    # "Thurston",
-    # "Whatcom",
-    # "Mason",
-    # "Clallam",
-    
     dir_in = r"Y:\PS_Cosmos\02_models\Wave_LUT\LUT_timeSeries"
     dir_out = r"C:\Temp"
 
@@ -78,8 +75,8 @@ def main():
 
     PACK_SCALE = 1e-4  # meters per integer count (i.e., meters * 1e4)
     FILL_INT = -9999
-    FILL_FLOAT = np.float32(-9999.0)  
-    
+    FILL_FLOAT = np.float32(-9999.0)
+
     # ===============================================================================
     # Parallelize with Dask
     # ===============================================================================
@@ -140,8 +137,8 @@ def main():
 
         # Rename label
         ds = ds.rename_vars({"Lat": "lat"})
-        ds = ds.rename_vars({'cmip_diff':'hs_CmipDiff'})
-        
+        ds = ds.rename_vars({"cmip_diff": "hs_CmipDiff"})
+
         # ===============================================================================
         # Process and convert to new dataset
         # ===============================================================================
@@ -161,13 +158,13 @@ def main():
             ds[var] = da  # assign back
 
         # Fill Values
-      
+
         ds["Hs"].attrs = {
             "long_name": "Significant Wave Height",
             "description": "Hs for ERA5 reanalysis periods",
             "units": "meters",
             "precision": "Data encoded as integer with 4 significant digits",
-            'note':	'Variable scaled with scale_factor . Check if applied correctly by your software',
+            "note": "Variable scaled with scale_factor . Check if applied correctly by your software",
         }
 
         ds["Dm"].attrs = {
@@ -175,8 +172,8 @@ def main():
             "description": "Dm for ERA5 reanalysis period",
             "units": "degrees",
             "precision": "Data encoded as integer with 4 significant digits",
-            'note':	'Variable scaled with scale_factor. Check if applied correctly by your software',
-            'reference':	'Degrees from True North.'
+            "note": "Variable scaled with scale_factor. Check if applied correctly by your software",
+            "reference": "Degrees from True North.",
         }
 
         ds["Tm"].attrs = {
@@ -184,8 +181,7 @@ def main():
             "description": "Tm for ERA5 reanalysis period",
             "units": "seconds",
             "precision": "Data encoded as integer with 4 significant digits",
-            'note':	'Variable scaled with scale_factor. Check if applied correctly by your software',
-
+            "note": "Variable scaled with scale_factor. Check if applied correctly by your software",
         }
 
         ds["lon"].attrs = {
@@ -211,7 +207,7 @@ def main():
             "note": "Variable scaled with scale_factor. Check if applied correctly by your software",
             "precision": "Data encoded as integer with 4 significant digits",
         }
-        
+
         ds["hs_CmipDiff"].attrs = {
             "long_name": "CMIP6 difference in Significant Wave Height",
             "units": "meters",
@@ -219,28 +215,32 @@ def main():
             "note": "Variable scaled with scale_factor. Check if applied correctly by your software",
             "precision": "Data encoded as integer with 4 significant digits",
         }
-        
-        
+
         # SEt some attributes to the varialbes
-        ds["cmip6"].attrs = {"long_name": "Cmip6 Model (HighResMIP)",
-                             'description': "Source model for projected wave height difference"}
-        
-        ds["station"].attrs = {'long_name': "station name"}
-        
-        ds["cmip6"].attrs = {"long_name": "Cmip6 Model (HighResMIP)",
-                             'description': "Source model for projected wave height difference"}
+        ds["cmip6"].attrs = {
+            "long_name": "Cmip6 Model (HighResMIP)",
+            "description": "Source model for projected wave height difference",
+        }
+
+        ds["station"].attrs = {"long_name": "station name"}
+
+        ds["cmip6"].attrs = {
+            "long_name": "Cmip6 Model (HighResMIP)",
+            "description": "Source model for projected wave height difference",
+        }
         # Global Attributes
         ds.attrs["processing_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ds.attrs["author"] = "Kai Parker (USGS PCMSC)"
         ds.attrs["description"] = (
             "This dataset contains modelled bulk wave parameters modeled using a wave lookup table and linear swell propogation for the reanalysis period."
-            "Modelled changes to the reanalysis timeseries (as predicted by CMIP6) are also included. Output is for stations in the Salish Sea"        )
+            "Modelled changes to the reanalysis timeseries (as predicted by CMIP6) are also included. Output is for stations in the Salish Sea"
+        )
         ds.attrs["DataReleaseCitation"] = "XXXXXX"
         ds.attrs["ModelCitation"] = "XXXXX"
         ds.attrs["InterpretiveProductCitation"] = "XXXXXX"
-        del ds.attrs['ProducedBy']
-        del ds.attrs['DataSource']
-        
+        del ds.attrs["ProducedBy"]
+        del ds.attrs["DataSource"]
+
         # ===============================================================================
         # Output
         # ===============================================================================
@@ -258,21 +258,23 @@ def main():
             add_offset=0.0,
         )
 
-        
         float_encoding = dict(
-            dtype= "float32",
-            zlib= True,
-            shuffle= True,
-            complevel= 5,
+            dtype="float32",
+            zlib=True,
+            shuffle=True,
+            complevel=5,
             _FillValue=FILL_FLOAT,
-)
-        
+        )
 
         print("Outputting data...")
 
         # Output the dataset for this county
         ds.to_netcdf(
-            os.path.join(dir_out,SLR, f"Reanalysis_and_Projected_CoSMoSwaves_{county}_sealevel{SLR}m.nc"),
+            os.path.join(
+                dir_out,
+                SLR,
+                f"Reanalysis_and_Projected_CoSMoSwaves_{county}_sealevel{SLR}m.nc",
+            ),
             engine="netcdf4",
             encoding={
                 "Hs": int_encoding,
@@ -281,7 +283,7 @@ def main():
                 "hs_CmipDiff": int_encoding,
                 "hs_quants": int_encoding,
                 "lon": float_encoding,
-                "lat":float_encoding ,
+                "lat": float_encoding,
             },
         )
 

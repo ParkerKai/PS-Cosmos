@@ -155,8 +155,7 @@ def main():
             files,
             engine='h5netcdf',
             parallel=True,
-            # Optional chunking if time is large; adjust to your data
-            # chunks={'time': 1000}
+            chunks={'time': 1000}
         )
 
         # Loop months 1..12
@@ -177,6 +176,7 @@ def main():
         # Close dataset to free resources
         ds_cmip.close()
 
+    print('Done!')
 
 if __name__ == '__main__':
     main()
