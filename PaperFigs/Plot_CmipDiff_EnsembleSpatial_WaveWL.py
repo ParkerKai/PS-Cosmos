@@ -43,7 +43,6 @@ SLR_list = ["000"]
 # Metric to plot
 metric = "RP_30"
 
-
 # ===============================================================================
 # %% Define some functions
 # ===============================================================================
@@ -62,6 +61,15 @@ cnty = gpd.read_file(
 lm = gpd.read_file(
     r"Y:\PS_Cosmos\GIS\general\PoliticalBoundaries_Shapefile\NA_PoliticalDivisions\data\bound_p\boundaries_p_2021_v3.shp"
 )
+
+
+# Load in the basin file
+mask  = gpd.read_file(
+    r"Y:\PS_Cosmos\GIS\Shapefiles\general\SalishSea_Basins.shp"
+)
+
+# Dissolve into a single (multi)polygon to avoid edges between parts
+mask_union = mask.dissolve()  # single row with unified geometry
 
 
 # ===============================================================================
@@ -180,8 +188,18 @@ plot_data_sig_wv = plot_data_wv.iloc[sign, :]
 
 
 # ===============================================================================
-# %% Load the  data
+# %% Plot the  data
 # ===============================================================================
+
+# Filter geographically 
+
+plot_data_wl = gpd.clip(plot_data_wl, mask_union)
+plot_data_wv = gpd.clip(plot_data_wv, mask_union)
+
+plot_data_sig_wl = gpd.clip(plot_data_sig_wl, mask_union)
+plot_data_sig_wv = gpd.clip(plot_data_sig_wv, mask_union)
+
+
 
 lm = lm.to_crs(crs=plot_data_sig_wl.crs)
 
@@ -190,8 +208,8 @@ if metric == "RI_1":
     vmin = -0.1
     vmax = 0.1
 elif metric == "RP_30":
-    vmin = -2
-    vmax = 2
+    vmin = -0.25
+    vmax = 0.25
     
 
 fig, [ax1, ax2] = plt.subplots(
@@ -250,4 +268,4 @@ ax2.set_yticklabels([])
 # cax = divider.append_axes("right", size="5%", pad=0.1)
 # matplotlib.pyplot.colorbar(elems[2], cax=cax)
 
-#fig.savefig(os.path.join(dir_out, f"MeanDiff_Map_{metric}_fixed.tiff"), dpi=400)
+fig.savefig(os.path.join(dir_out, f"MeanDiff_Map_{metric}_fixed.tiff"), dpi=400)

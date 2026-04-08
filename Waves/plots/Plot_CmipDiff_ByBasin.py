@@ -31,7 +31,7 @@ from matplotlib import pyplot as plt
 # ===============================================================================
 # Directory where the DFM data resides
 # dir_in = r'D:\DFM'
-dir_in = r"Y:\PS_Cosmos\GIS\Waves\DFM_CmipDiff_byModel"
+dir_in = r"Y:\PS_Cosmos\GIS\Waves\Wave_CmipDiff_byModel"
 dir_in_gis = r"Y:\PS_Cosmos\GIS\Shapefiles\general"
 dir_out = r"Y:\PS_Cosmos\Figures\Waves\basin_Aggregate"
 
@@ -153,11 +153,11 @@ axs.set_xlim([-0.5, 9.5])
 plt.xticks(ticks=np.unique(pull["BasinID"]), labels=Basin_labels, rotation=20)
 axs.set_ylabel("Ensemble Change in Hs (cm)")
 
-# fig.savefig(
-#     os.path.join(dir_out, f"EnsembleChangeWave_Basin_{metric}.tif"),
-#     dpi=300,
-#     bbox_inches="tight",
-# )
+fig.savefig(
+    os.path.join(dir_out, f"EnsembleChangeWave_Basin_{metric}.tif"),
+    dpi=300,
+    bbox_inches="tight",
+)
 
 ############################################################################
 
@@ -240,12 +240,14 @@ axs.plot([-0.5, 70], [0, 0], color="black", linewidth=2, linestyle="--")
 axs.set_title("Change in Signficant Wave Height")
 axs.grid()
 axs.set_xlim([0, 69])
-axs.set_ylim([-20, 20])
+#axs.set_ylim([-20, 20])
 
 plt.xticks(
     ticks=[2.5, 9.5, 16.5, 23.5, 30.5, 37.5, 44.5, 51.5, 58.5, 65.5],
     labels=Basin_labels,
     rotation=20,
+    ha="right",              # right-justify so the end of text sits on the tick
+    rotation_mode="anchor",  # keep the anchor on the tick when rotated
 )
 axs.set_ylabel("Ensemble Change in Hs (cm)")
 axs.legend(
@@ -261,11 +263,11 @@ axs.legend(
 )
 
 
-# fig.savefig(
-#     os.path.join(dir_out, "EnsembleChangeWave_Basin_AcrossRP.tif"),
-#     dpi=300,
-#     bbox_inches="tight",
-# )
+fig.savefig(
+    os.path.join(dir_out, "EnsembleChangeWave_Basin_AcrossRP.tif"),
+    dpi=300,
+    bbox_inches="tight",
+)
 
 ############################################################################
 
@@ -362,6 +364,8 @@ plt.xticks(
     ticks=[2.5, 9.5, 16.5, 23.5, 30.5, 37.5, 44.5, 51.5, 58.5, 65.5],
     labels=Basin_labels,
     rotation=20,
+    ha="right",              # right-justify so the end of text sits on the tick
+    rotation_mode="anchor",  # keep the anchor on the tick when rotated
 )
 axs.set_ylabel("Ensemble Change in Hs (cm)")
 
@@ -378,8 +382,8 @@ axs.set_ylabel("Ensemble Change in Hs (cm)")
 # )
 
 
-# fig.savefig(
-#     os.path.join(dir_out, f"EnsembleChangeWave_Basin_AcrossSLR_{metric}.tif"),
-#     dpi=300,
-#     bbox_inches="tight",
-# )
+fig.savefig(
+    os.path.join(dir_out, f"EnsembleChangeWave_Basin_AcrossSLR_{metric}.tif"),
+    dpi=300,
+    bbox_inches="tight",
+)

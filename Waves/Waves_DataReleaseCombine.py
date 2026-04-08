@@ -50,22 +50,23 @@ def main():
 
     # COUNTIES
     county_list = [
-    "Kitsap",
-    "Snohomish",
-    "IslandCounty",
-    "Skagit",
-    "Jefferson",
-    "King",
-    "Pierce",
-    "Thurston",
-    "Whatcom",
-    "Mason",
-    "Clallam",
+ 
     "SanJuan"
  ]   #  
 
         
-
+   # "Kitsap",
+    # "Snohomish",
+    # "IslandCounty",
+    # "Skagit",
+    # "Jefferson",
+    # "King",
+    # "Pierce",
+    # "Thurston",
+    # "Whatcom",
+    # "Mason",
+    # "Clallam",
+    
     dir_in = r"Y:\PS_Cosmos\02_models\Wave_LUT\LUT_timeSeries"
     dir_out = r"C:\Temp"
 

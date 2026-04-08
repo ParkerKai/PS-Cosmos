@@ -50,7 +50,7 @@ Mod_list = [
 SLR_list = ["000", "050", "100", "200", "300"]
 
 # Metric to plot
-metric = "RI_1"
+metric = "RP_30"
 
 
 # ===============================================================================
@@ -246,19 +246,22 @@ plt.xticks(
     ticks=[2.5, 9.5, 16.5, 23.5, 30.5, 37.5, 44.5, 51.5, 58.5, 65.5],
     labels=Basin_labels,
     rotation=20,
+    ha="right",              # right-justify so the end of text sits on the tick
+    rotation_mode="anchor",  # keep the anchor on the tick when rotated
 )
+
 axs.set_ylabel("Ensemble Change in Water Levels (cm)")
-axs.legend(
-    [
-        vp1["bodies"][0],
-        vp2["bodies"][0],
-        vp3["bodies"][0],
-        vp4["bodies"][0],
-        vp5["bodies"][0],
-    ],
-    ["RP1", "RP5", "RP10", "RP15", "RP30"],
-    loc="lower right",
-)
+# axs.legend(
+#     [
+#         vp1["bodies"][0],
+#         vp2["bodies"][0],
+#         vp3["bodies"][0],
+#         vp4["bodies"][0],
+#         vp5["bodies"][0],
+#     ],
+#     ["RP1", "RP5", "RP10", "RP15", "RP30"],
+#     loc="lower right",
+# )
 
 
 fig.savefig(
@@ -350,13 +353,15 @@ for basin in np.unique(pull["BasinID"]):
     cnt = cnt + 2
 
 axs.plot([-0.5, 70], [0, 0], color="black", linewidth=2, linestyle="--")
-axs.set_title("Change in Annual Water Levels by SLR Scenario")
+axs.set_title("Change in Water Levels by SLR Scenario")
 axs.grid()
 axs.set_xlim([0, 69])
 plt.xticks(
     ticks=[2.5, 9.5, 16.5, 23.5, 30.5, 37.5, 44.5, 51.5, 58.5, 65.5],
     labels=Basin_labels,
     rotation=20,
+    ha="right",              # right-justify so the end of text sits on the tick
+    rotation_mode="anchor",  # keep the anchor on the tick when rotated
 )
 axs.set_ylabel("Ensemble Change in Water Levels (cm)")
 

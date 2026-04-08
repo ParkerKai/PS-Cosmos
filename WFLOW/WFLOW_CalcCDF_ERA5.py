@@ -17,27 +17,17 @@ __author__ = "Kai Parker"
 __email__ = "kaparker@usgs.gov"
 
 #===============================================================================
-# %% Import Modules
+# Import Modules
 #===============================================================================
 import os
 import numpy as np
 import xarray as xr
 import pandas as pd
-import dask.distributed
+from dask.distributed import Client, LocalCluster
+import dask
 
 #===============================================================================
-# %% User Defined inputs
-#===============================================================================
-# Directory where the WFLOW data resides
-#dir_in = r'D:\DFM'
-dir_in = r'Y:\PS_Cosmos\02_models\WFLOW\11_20_2025_Discharges_SnohomishKitsap'
-dir_out = r'Y:\PS_Cosmos\02_models\WFLOW\11_20_2025_Discharges_SnohomishKitsap'
-
-# model grid to process (county)
-cnty = 'kitsap'
-
-#===============================================================================
-# %% Define some functions
+# Define some functions
 #===============================================================================
 
 @dask.delayed()
@@ -76,8 +66,8 @@ def emp_cdf(data,var):
         
         
     delayed_results = dask.delayed(pd.concat)(cdf)
-    if stat == 0:
-        delayed_results.visualize(filename=os.path.join(dir_out,'TaskGraph.svg'), optimize_graph=True)
+    # if stat == 0:
+    #     delayed_results.visualize(filename=os.path.join(dir_out,'TaskGraph.svg'), optimize_graph=True)
     
     out = dask.compute(delayed_results)
     
@@ -92,28 +82,58 @@ def monthly_CDF(data,var,month):
     return cdf_month 
 
 
-# def main():    
+def main():    
+   
+
+    #===============================================================================
+    #  User Defined inputs
+    #===============================================================================
+    
+    # Directory where the WFLOW data resides
+    #dir_in = r'D:\DFM'
+    dir_in = r'Y:\PS_Cosmos\02_models\WFLOW\11_20_2025_Discharges_SnohomishKitsap'
+    dir_out = r'Y:\PS_Cosmos\02_models\WFLOW\11_20_2025_Discharges_SnohomishKitsap'
+
+    # model grid to process (county)
+    cnty = 'kitsap'
+
+    # Number of workers
+    n = 6
+
+    # -----------------------------
+    # Dask cluster
+    # -----------------------------
+    print("starting Dask Cluster")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+
+    cluster = LocalCluster(
+        n_workers=n,
+        threads_per_worker=1,
+        processes=True,
+        silence_logs=False,
+    )
+    client = Client(cluster)
+
+    print("Dashboard:", cluster.dashboard_link)
+    print("Workers:", client.scheduler_info().get("workers", {}).keys())
+
+    #===============================================================================
+    # Load the data 
+    #===============================================================================
+    # ERA5 Forced data 
+    files = os.path.join(dir_in,cnty,'era5_3hourly','output_scalar.nc')
+
+    ds_cmip = xr.open_mfdataset(files, engine='h5netcdf', parallel=True)
+
+    # split by month
+    for month in np.arange(1, 13, 1, dtype=int):
+        print('Processing Month: {}'.format(month))
         
-# cl= dask.distributed.LocalCluster()
-# client=dask.distributed.Client(cl)
+        cdf_month = monthly_CDF(ds_cmip,'Q_contour',month)[0]
+        
+        cdf_month.to_pickle(os.path.join(dir_out,cnty,'era5_3hourly','CDFmonthly_{0:02d}.pkl'.format(month)))
 
-# print(client.dashboard_link)
-
-#===============================================================================
-# %% Load the data 
-#===============================================================================
-# ERA5 Forced data 
-files = os.path.join(dir_in,cnty,'era5_3hourly','output_scalar.nc')
-
-ds_cmip = xr.open_mfdataset(files, engine='h5netcdf', parallel=True)
-
-# split by month
-for month in np.arange(1, 13, 1, dtype=int):
-    print('Processing Month: {}'.format(month))
-    
-    cdf_month = monthly_CDF(ds_cmip,'Q_contour',month)[0]
-    
-    cdf_month.to_pickle(os.path.join(dir_out,cnty,'era5_3hourly','CDFmonthly_{0:02d}.pkl'.format(month)))
-
-# if __name__ == '__main__':
-#     main()
+if __name__ == '__main__':
+    main()
