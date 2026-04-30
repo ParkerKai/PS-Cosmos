@@ -111,19 +111,19 @@ def main():
     # -----------------------------
     # User-defined inputs
     # -----------------------------
-    dir_in = r'D:\wflow\11_20_2025_Discharges_SnohomishKitsap'
-    dir_out = r'D:\wflow\11_20_2025_Discharges_SnohomishKitsap'
+    dir_in = r'C:\Users\kai\Documents\KaiDownloads\WFLOW\11_20_2025_Discharges_SnohomishKitsap'
+    dir_out = r'C:\Users\kai\Documents\KaiDownloads\WFLOW\11_20_2025_Discharges_SnohomishKitsap'
 
     cnty = 'kitsap'
-    Mod_list = ['CNRM','EcEarth','GFDL','HadGemHH','HadGemHM','HadGemHMsst']
-    Per = 'historic'
+    Mod_list = ['EcEarth','GFDL','HadGemHH','HadGemHM','HadGemHMsst']   # 'CNRM',
+    Per = 'future'
 
     var = 'Q_contour'                   # variable to process
     station_dim = 'Q_contour_gauges_contour'  # station dimension name in the file
     save_as_parquet = False             # True for Parquet; False keeps Pickle
 
     # Number of workers
-    n = 6
+    n = 8
 
     # -----------------------------
     # Dask cluster

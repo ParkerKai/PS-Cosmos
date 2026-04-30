@@ -31,11 +31,11 @@ import re
 # ===============================================================================
 # Directory where the DFM data resides
 # dir_in = r'D:\DFM'
-dir_in = r"Y:\WFLOW\20240419_diff"
+dir_in = r"C:\Users\kai\Documents\KaiDownloads\WFLOW\11_20_2025_Discharges_SnohomishKitsap"
 dir_out = r"Y:\WFLOW\20240419_discharge_wflow_CMIP6_Combined"
 
 # model grid to process (county)
-cnty = "itsap"
+cnty = "kitsap"
 
 # ===============================================================================
 # %% Define some functions
@@ -225,21 +225,21 @@ def main():
     # We have documentation on how to start a Dask Cluster in different computing environments [here](../environment_set_up/clusters.md).
 
     # Reduce oversubscription from BLAS libraries
-    os.environ.setdefault("MKL_NUM_THREADS", "1")
-    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    # os.environ.setdefault("MKL_NUM_THREADS", "1")
+    # os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    # os.environ.setdefault("OMP_NUM_THREADS", "1")
 
-    # Prefer processes for CPU-bound Python work
-    cluster = LocalCluster(
-        n_workers=n,  # usually #cores
-        threads_per_worker=1,
-        processes=True,
-        silence_logs=False,  # helpful while debugging
-    )
-    client = Client(cluster)
+    # # Prefer processes for CPU-bound Python work
+    # cluster = LocalCluster(
+    #     n_workers=n,  # usually #cores
+    #     threads_per_worker=1,
+    #     processes=True,
+    #     silence_logs=False,  # helpful while debugging
+    # )
+    # client = Client(cluster)
 
-    print("Dashboard:", cluster.dashboard_link)
-    print("Workers:", client.scheduler_info().get("workers", {}).keys())
+    # print("Dashboard:", cluster.dashboard_link)
+    # print("Workers:", client.scheduler_info().get("workers", {}).keys())
 
     # ===============================================================================
     # Load the data
