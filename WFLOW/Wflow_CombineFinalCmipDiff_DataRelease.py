@@ -23,7 +23,9 @@ import xarray as xr
 import dask.distributed
 from datetime import datetime
 import pandas as pd
-import re 
+import re
+import geopandas as gpd
+from dask.distributed import Client, LocalCluster
 
 
 # ===============================================================================
@@ -31,8 +33,9 @@ import re
 # ===============================================================================
 # Directory where the DFM data resides
 # dir_in = r'D:\DFM'
-dir_in = r"C:\Users\kai\Documents\KaiDownloads\WFLOW\11_20_2025_Discharges_SnohomishKitsap"
-dir_out = r"Y:\WFLOW\20240419_discharge_wflow_CMIP6_Combined"
+dir_in = (
+    r"C:\Users\kai\Documents\KaiDownloads\WFLOW\11_20_2025_Discharges_SnohomishKitsap"
+)
 
 # model grid to process (county)
 cnty = "kitsap"
@@ -189,17 +192,11 @@ def mask_stations_by_polygon(
 
 def main():
 
-    print('THIS HAS not been finished111 still in progress')
-    
     # ===============================================================================
     # User Defined inputs
     # ===============================================================================
 
-    dir_ERA5 = os.path.join(r"D:\Kai\DFM", f"ERA5_{SLR}")
-    dir_diff = os.path.join(r"D:\Kai\DFM", f"CDF_diff_{SLR}")
-    dir_Tidal = os.path.join(r"D:\Kai\DFM", f"ERA5_{SLR}_Tidal")
-    dir_gis = r"D:\Kai\DFM\GIS"
-    dir_out = os.path.join(r"D:\Kai\DFM", f"Combined_{SLR}")
+    dir_out = os.path.join(dir_in, cnty, "DataRelease")
 
     # Number of cpus to put into the cluster.
     # n = os.cpu_count() or 1
@@ -209,6 +206,8 @@ def main():
 
     PACK_SCALE = 1e-4  # meters per integer count (i.e., meters * 1e4)
     FILL_INT = -9999
+
+    os.makedirs(dir_out, exist_ok=True)
 
     # ===============================================================================
     # Parallelize with Dask
@@ -225,184 +224,140 @@ def main():
     # We have documentation on how to start a Dask Cluster in different computing environments [here](../environment_set_up/clusters.md).
 
     # Reduce oversubscription from BLAS libraries
-    # os.environ.setdefault("MKL_NUM_THREADS", "1")
-    # os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-    # os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
 
-    # # Prefer processes for CPU-bound Python work
-    # cluster = LocalCluster(
-    #     n_workers=n,  # usually #cores
-    #     threads_per_worker=1,
-    #     processes=True,
-    #     silence_logs=False,  # helpful while debugging
-    # )
-    # client = Client(cluster)
+    # Prefer processes for CPU-bound Python work
+    cluster = LocalCluster(
+        n_workers=n,  # usually #cores
+        threads_per_worker=1,
+        processes=True,
+        silence_logs=False,  # helpful while debugging
+    )
+    client = Client(cluster)
 
-    # print("Dashboard:", cluster.dashboard_link)
-    # print("Workers:", client.scheduler_info().get("workers", {}).keys())
+    print("Dashboard:", cluster.dashboard_link)
+    print("Workers:", client.scheduler_info().get("workers", {}).keys())
 
     # ===============================================================================
-    # Load the data
+    # Load the Q data
     # ===============================================================================
 
     # Load the data
     print("Loading data...")
-    # ds_full = xr.open_mfdataset(
-    #     files, engine="netcdf4", parallel=True, chunks={"time": 52560, "station": 64}, combine="by_coords")
-
-    # ds_tidal = xr.open_mfdataset(
-    #     files,
-    #     engine="netcdf4",
-    #     parallel=True,
-    #     chunks={"time": 52560, "station": 64},
-    #     combine="by_coords",
-    # )
-
-    # files = glob(os.path.join(dir_full, "*.nc"))
-
-    # ds_diff = xr.open_mfdataset(
-    #     files,
-    #     engine="netcdf4",
-    #     chunks={"station": 64, "time": 52560, "cmip6": 1},
-    #     combine="by_coords",
-    # )
 
     # Load the data
 
-    files = glob(os.path.join(dir_in, cnty, "*.nc"))
-    ds_diff = xr.open_mfdataset(files, engine="h5netcdf", parallel=True)
+    files = glob(os.path.join(dir_in, cnty, "cdf_diff", "*.nc"))
+    ds_diff = xr.open_mfdataset(files, engine="netcdf4", parallel=True)
 
-    # Some of the ds_diff values got limited by the interger conversion
-    ds_diff = ds_diff.where((ds_diff >= -2000000000) & (ds_diff <= 2000000000))
+    ds_diff = ds_diff.persist()
+
+    # ===============================================================================
+    # Load Station location information
+    # ===============================================================================
+
+    # Load the geojson
+    df = gpd.read_file(os.path.join(dir_in, cnty, "gauges_contour.geojson"))
+
+    # Add Lat Lon to xarray file
+    lat = np.full(ds_diff["station"].size, np.nan)
+    lon = np.full(ds_diff["station"].size, np.nan)
+    contour = np.full(ds_diff["station"].size, np.nan)
+    stat_geom = []
+    for cnt, stat in enumerate(ds_diff["station"].values):
+        pull = df.query("fid == @stat")
+
+        lat[cnt] = pull["geometry"].y.to_numpy()[0]
+        lon[cnt] = pull["geometry"].x.to_numpy()[0]
+        contour[cnt] = pull["contour"].to_numpy()[0]
+
+    ds_diff["lat"] = xr.DataArray(
+        data=lat,  # enter data here
+        dims=["station"],
+        coords={"station": ds_diff["station"]},
+        attrs= {
+            "standard_name": "latitude",
+            "long_name": "y-coordinate of station",
+            "projection": "WGS 84",
+            "epsg": "4326",
+            "units": "degrees_north",
+            },
+    )
+
+    ds_diff["lon"] = xr.DataArray(
+        data=lon,  # enter data here
+        dims=["station"],
+        coords={"station": ds_diff["station"]},
+        attrs= {
+            "standard_name": "longitude",
+            "long_name": "x-coordinate of station",
+            "projection": "WGS 84",
+            "epsg": "4326",
+            "units": "degree_east",
+            },
+    )
+
+    ds_diff["contour"] = xr.DataArray(
+        data=contour,  # enter data here
+        dims=["station"],
+        coords={"station": ds_diff["station"]},
+        attrs={
+            "long_name": "Station Contour (approximate)",
+            "units": "m",
+            "datum": "NAVD88",
+            "desc": "Approximate contour elevation of the station as pulled from the WFLOW network. True elevation at location may differ dramatically due to WFLOW resolution and DEM difference",
+        },
+    )
 
     # ===============================================================================
     # Process and convert to new dataset
     # ===============================================================================
+    ds_era5 = ds_diff.copy()
+    ds_era5 = ds_era5.rename({"cmip_diff": "Q_CmipDiff"})
 
-    # Interpolate to hourly
-    print("Interpolating to hourly...")
-    ds_full = ds_full.resample(time="1h").nearest(tolerance="2h")
-    ds_tidal = ds_tidal.resample(time="1h").nearest(tolerance="2h")
-    ds_diff = ds_diff.resample(time="1h").nearest(tolerance="2h")
-
-    # Ensure uniqueness post-resample
-    ds_full = ensure_unique_sorted_time(ds_full)
-    ds_tidal = ensure_unique_sorted_time(ds_tidal)
-    ds_diff = ensure_unique_sorted_time(ds_diff)
-
-    # Exact intersection along time & station
-    ds_full, ds_tidal, ds_diff = xr.align(
-        ds_full,
-        ds_tidal,
-        ds_diff,
-        join="inner",  # <-- intersection only
-        exclude=[],
-    )
-
-    # Confirm uniqueness *again* (should be fine)
-    ds_full = ensure_unique_sorted_time(ds_full)
-    ds_tidal = ensure_unique_sorted_time(ds_tidal)
-    ds_diff = ensure_unique_sorted_time(ds_diff)
-
-    # Create a new dataset to hold the data
-    print("Creating dataset...")
-    ds_era5 = ds_full.copy()
-    ds_era5["ntr"] = ds_full["waterlevel"] - ds_tidal["waterlevel"]
-
-    # Drop time from lat lon and bedlevel
-    # Safe: strip the 'time' dimension from lon/lat/bedlevel without altering the Dataset coords
-    for var in ["lon", "lat"]:
-        da = ds_era5[var].copy()
-
-        # Ensure these are pure float variables with no packing
-        da = da.astype("float32")  # Cast to float32
-
-        # Remove any inherited packing from attrs and encoding
-        for key in ("ScaleFactor", "scale_factor", "add_offset", "_FillValue", "dtype"):
-            da.attrs.pop(key, None)
-
-        # Critically: clear the *encoding* dict; this is what NetCDF writing uses
-        da.encoding.clear()
-
-        # Put it back
-        ds_era5[var] = da
-
-    # Add the cmip6 difference to the dataset
-    ds_diff = ds_diff.reindex(
-        time=ds_full["time"], station=ds_full["station"], method=None
-    )
-
-    ds_era5["wl_CmipDiff"] = ds_diff["cmip_diff"]
-
-    # Deal with scaling (Not done with _ScaleValue for original dataset)
-    ds_era5["wl_CmipDiff"] = ds_era5["wl_CmipDiff"] / 10000
-    ds_era5["waterlevel"] = ds_era5["waterlevel"] / 10000
-    ds_era5["ntr"] = ds_era5["ntr"] / 10000
-
-    # Remove SLR
-    ds_era5["waterlevel"] = ds_era5["waterlevel"] - (int(SLR) / 100)
-
-    ds_era5["waterlevel"].attrs = {
-        "units": "meters",
-        "standard_name": "sea_surface_height_above_reference_datum",
-        "long_name": "water level",
-        "reference": "NAVD88",
-        "desc": "Modelled Water levels for the reanalysis period",
+    ds_era5["Q"].attrs = {
+        "units": "m3/s",
+        "standard_name": "Discharge",
+        "long_name": "Discharge (Q) ",
+        "desc": "Discharge Q from WFLOW forced with ERA5 reanalysis",
         "note": "Variable scaled with _ScaleFactor. Check if applied correctly by your software",
         "precision": "Data encoded as integer with 4 significant digits",
     }
 
-    ds_era5["ntr"].attrs = {
-        "units": "meters",
-        "long_name": "non-tidal residual",
-        "desc": "Calculated by subtracting modelled water levels with tidal only forcing from a run with full forcing",
-        "reference": "NAVD88",
-        "note": "Variable scaled with _ScaleFactor. Check if applied correctly by your software",
-        "precision": "Data encoded as integer with 4 significant digits",
-    }
-    ds_era5["wl_CmipDiff"].attrs = {
-        "long_name": "CMIP6 difference in water levels",
-        "units": "meters",
-        "desc": "Predicted change by each CMIP6 model for each ERA5 water level value. Delta is calculated by subtracting the future period (2015-2050) from the historic period (1950-2014). Change is calculated for each quantile for each month.",
-        "usage": "Adding the wl_CmipDiff variable to the waterlevel variable produces the pseudo-global-warming timeseries (experienced climate with climate change delta applied)",
+    
+    ds_era5["Q_CmipDiff"].attrs = {
+        "long_name": "CMIP6 difference in Discharge (Q)",
+        "units": "m3/s",
+        "desc": "Predicted change by each CMIP6 model for each ERA5 discharge value. Delta is calculated by subtracting the future period (2015-2050) from the historic period (1950-2014). Change is calculated for each quantile for each month.",
+        "usage": "Adding the Q_CmipDiff variable to the Q variable produces the pseudo-global-warming timeseries (experienced climate with climate change delta applied)",
         "note": "Variable scaled with _ScaleFactor. Check if applied correctly by your software",
         "precision": "Data encoded as integer with 4 significant digits",
     }
 
-    ds_era5["wl_quants"].attrs = {
+    ds_era5["Q_quants"].attrs = {
         "units": "None",
-        "long_name": "Waterlevel Quantile (Monthly)",
+        "long_name": "Discharge Quantile (Monthly)",
         "desc": "Quantiles (computed for each month) for all data in timeseries within specific month",
         "note": "Variable scaled with _ScaleFactor. Check if applied correctly by your software",
         "precision": "Data encoded as integer with 4 significant digits",
     }
 
-    ds_era5["lon"].attrs = {
-        "standard_name": "longitude",
-        "long_name": "x-coordinate of station",
-        "projection": "WGS 84",
-        "epsg": "4326",
-        "units": "degree_east",
-    }
-
-    ds_era5["lat"].attrs = {
-        "standard_name": "latitude",
-        "long_name": "y-coordinate of station",
-        "projection": "WGS 84",
-        "epsg": "4326",
-        "units": "degrees_north",
-    }
-
     # SEt some attributes to the varialbes
-    ds_era5["cmip6"].attrs = {"long_name": "Cmip6 Model (HighResMIP)"}
+    ds_era5["cmip6"].attrs = {"long_name": "Cmip6 Model (HighResMIP)",
+        "description": "Source model for projected wave height difference",
+    }
+
+
+    ds_era5["station"].attrs = {"long_name": "station name"}
 
     # Global Attributes
     ds_era5.attrs["processing_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ds_era5.attrs.pop("forcing", None)
-    ds_era5.attrs.pop("source_dir", None)
-    ds_era5.attrs["author"] = "Kai Parker (USGS PCMSC)"
+    ds_era5.attrs.pop("DataSource", None)
+    ds_era5.attrs["author"] = "Wflow team (Joost Buitink & Brendan Dalmijn, Deltares) and USGS (Kai Parker, PCMSC)"
     ds_era5.attrs["description"] = (
-        "This dataset contains modelled water levels and Non-tidal residual for the reanalysis period. Modelled changes to the reanalysis timeseries (as predicted by CMIP6) are also included. Output is for stations in the Salish Sea"
+        "This dataset contains modelled Discharge (Q) for the reanalysis period. Modelled changes to the reanalysis timeseries (as predicted by CMIP6) are also included. Output is for stations in the Salish Sea"
     )
     ds_era5.attrs["DataReleaseCitation"] = "XXXXXX"
     ds_era5.attrs["ModelCitation"] = "XXXXX"
@@ -415,91 +370,28 @@ def main():
     ds_era5 = ds_era5.persist()
 
     # 1) Time monotonic and no NaT
-    assert np.all(~pd.isna(ds_full["time"].values)), "Found NaT in time after decode_cf"
+    assert np.all(~pd.isna(ds_era5["time"].values)), "Found NaT in time after decode_cf"
     assert np.all(
-        np.diff(ds_full["time"].values.astype("datetime64[ns]"))
+        np.diff(ds_era5["time"].values.astype("datetime64[ns]"))
         >= np.timedelta64(0, "ns")
     ), "Time is not monotonically increasing"
 
     # 2) Station unique
-    st = pd.Index(ds_full["station"].values)
+    st = pd.Index(ds_era5["station"].values)
     assert st.is_unique, "Duplicate station IDs found"
 
     # 3) Big NaN blocks?
-    for v in ["waterlevel", "ntr", "cmip_diff"]:
-        if v in ds_full:
+    for v in ["Q", "Q_quants"]:
+        if v in ds_era5:
             # ratio of NaNs by time slice—shouldn’t be 100% for long blocks
-            nan_by_time = ds_full[v].isnull().mean(dim="station")
+            nan_by_time = ds_era5[v].isnull().mean(dim="station")
             bad = (nan_by_time > 0.95).load()  # compute
             if bad.any():
                 print(
                     f"WARNING: {v} has time slices with >95% NaNs. Indices:",
                     np.where(bad.values)[0][:10],
                 )
-
-    # ===============================================================================
-    # Remove stations using a polygon.
-    # ================================================================================
-
-    ds_era5, remove_flag = mask_stations_by_polygon(
-        ds_era5,
-        os.path.join(dir_gis, "StationRemove.shp"),
-        lat_var="lat",
-        lon_var="lon",
-        predicate="contains",
-    )
-
-    print(f"Removed {int(remove_flag.sum().item())} grid cells (across all times).")
-
-    # ===============================================================================
-    # Load the county information for spatial grouping
-    # ===============================================================================
-    print("Loading County shapefiles and finding station subsets...")
-
-    # Load the county shapefile
-    counties = gpd.read_file(
-        os.path.join(dir_gis, "Washington_Counties_(no_water)___washco_area.shp")
-    )
-    counties = counties.to_crs(crs="EPSG:4326")
-
-    # Subset to only Salish Sea Counties
-
-    county_list = [
-        "Kitsap",
-        "Snohomish",
-        "Island",
-        "Skagit",
-        "Jefferson",
-        "King",
-        "Pierce",
-        "Thurston",
-        "Whatcom",
-        "Mason",
-        "San Juan",
-        "Clallam",
-    ]
-
-    # Normalize COUNTY
-    counties["COUNTY_norm"] = counties["COUNTY"].astype(str).map(normalize)
-
-    # Build a regex pattern of alternatives (exact normalized tokens)
-    alts = "|".join(re.escape(normalize(c)) for c in county_list)
-    pattern = rf"(?:^|.*)({alts})(?:.*|$)"  # contains any of the normalized tokens
-
-    # Filter using contains; na=False to ignore NaNs
-    mask = counties["COUNTY_norm"].str.contains(pattern, regex=True, na=False)
-    counties = counties[mask].copy()
-
-    # Stations from DFM
-    stations = gpd.GeoDataFrame(
-        geometry=gpd.points_from_xy(ds_era5["lon"].values, ds_era5["lat"].values),
-        crs="EPSG:4326",
-    )
-
-    Index_DFM = gpd.sjoin(counties, stations, how="right", predicate="intersects")
-    Index_DFM = Index_DFM.rename(columns={"index_left": "CountyID"})
-    Index_DFM["CountyID"] = Index_DFM["CountyID"].fillna(-999).astype("int32")
-
+    
     # ===============================================================================
     #  Output
     # ===============================================================================
@@ -530,36 +422,21 @@ def main():
 
     print("Outputting data...")
 
-    ind_county = pd.Index(list(counties.index) + [-999])  # keep an OutOfCounty bucket
-
-    for county in ind_county:
-        county_name = (
-            counties.loc[county]["COUNTY_norm"] if county != -999 else "OutOfCounty"
-        )
-
-        print(f"Processing county {county_name}...")
-
-        # Select the data for the current county
-        dfm_pnts = Index_DFM[Index_DFM["CountyID"] == county]
-        ds_county = ds_era5.isel(station=dfm_pnts.index)
-
-        ds_county.attrs["County"] = county_name
-
-        # Output the dataset for this county
-        ds_county.to_netcdf(
-            os.path.join(
-                dir_out, f"Reanalysis_and_Projected_CoSMoSwaterlevels_{county_name}.nc"
-            ),
-            engine="netcdf4",
-            encoding={
-                "waterlevel": int_encoding,
-                "ntr": int_encoding,
-                "wl_CmipDiff": int_encoding,
-                "wl_quants": int_encoding,
-                "lon": coord_float_encoding,
-                "lat": coord_float_encoding,
-            },
-        )
+    # Output the dataset for this county
+    ds_era5.to_netcdf(
+        os.path.join(
+            dir_out, f"Reanalysis_and_Projected_WFLOWdischarges_{cnty}.nc"
+        ),
+        engine="netcdf4",
+        encoding={
+            "Q": int_encoding,
+            "Q_CmipDiff": int_encoding,
+            "Q_quants": int_encoding,
+            "lon": coord_float_encoding,
+            "lat": coord_float_encoding,
+            "contour": coord_float_encoding,
+        },
+    )
 
     # ===============================================================================
     # Cluster shutdown and cleanup
@@ -567,6 +444,8 @@ def main():
 
     client.close()
     cluster.close()
+
+    print('Done! ')
 
 
 if __name__ == "__main__":

@@ -163,7 +163,7 @@ def main():
     Mod_list = ["CNRM", "EcEarth", "GFDL", "HadGemHH", "HadGemHM", "HadGemHMsst"]
 
     # model grid to process (county)
-    cnty = "kitsap"
+    cnty = "snohomish"
 
     n_workers = 10
 

@@ -216,12 +216,6 @@ def main():
             "precision": "Data encoded as integer with 4 significant digits",
         }
 
-        # SEt some attributes to the varialbes
-        ds["cmip6"].attrs = {
-            "long_name": "Cmip6 Model (HighResMIP)",
-            "description": "Source model for projected wave height difference",
-        }
-
         ds["station"].attrs = {"long_name": "station name"}
 
         ds["cmip6"].attrs = {
