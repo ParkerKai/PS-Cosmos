@@ -30,9 +30,12 @@ import matplotlib.pyplot as plt
 # ===============================================================================
 # Directory where the DFM data resides
 # dir_in = r'D:\DFM'
-dir_in = r"D:\Combined_DFM\ERA5"
+# dir_in = r"D:\Combined_DFM\ERA5"
+# dir_in_gis = r"Y:\PS_Cosmos\GIS\Shapefiles\general"
+# dir_out = r"Y:\PS_Cosmos\Figures\DFM\basin_Aggregate"
+dir_in = r'D:\Kai\DataDownloads\Combined_WaveWL\ERA5\ERA5'
 dir_in_gis = r"Y:\PS_Cosmos\GIS\Shapefiles\general"
-dir_out = r"Y:\PS_Cosmos\Figures\DFM\basin_Aggregate"
+
 
 
 # ===============================================================================

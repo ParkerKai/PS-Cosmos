@@ -45,8 +45,8 @@ Gauges = [
     "9447130",  # SEattle
     "9446484",  # Tacoma
     "9449880",  # Friday Harbor
-    "9449424",
-]  # Cherry POint
+    "9449424",# Cherry POint
+]  
 
 # sites=['cdip162']
 
