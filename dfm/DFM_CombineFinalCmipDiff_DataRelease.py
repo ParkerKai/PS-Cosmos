@@ -269,7 +269,7 @@ def main():
         data_vars="minimal",
         coords="minimal",
         compat="override",
-        chunks={"time": 52560, "station": 64},
+        chunks={"time": 52560, "station": 32},
     )
     ds_full = ensure_unique_sorted_time(ds_full)
 
@@ -284,7 +284,7 @@ def main():
         data_vars="minimal",
         coords="minimal",
         compat="override",
-        chunks={"time": 52560, "station": 64},
+        chunks={"time": 52560, "station": 32},
     )
     ds_tidal = ensure_unique_sorted_time(ds_tidal)
 
@@ -299,7 +299,7 @@ def main():
         data_vars="minimal",
         coords="minimal",
         compat="override",
-        chunks={"time": 52560, "station": 64},
+        chunks={"time": 52560, "station": 32},
     )
     ds_diff = ensure_unique_sorted_time(ds_diff)
 
@@ -578,6 +578,7 @@ def main():
 
     ind_county = pd.Index(list(counties.index) + [-999])  # keep an OutOfCounty bucket
 
+    ind_county = ind_county[4::]
     for county in ind_county:
         county_name = (
             counties.loc[county]["COUNTY_norm"] if county != -999 else "OutOfCounty"
@@ -590,7 +591,6 @@ def main():
         ds_county = ds_era5.isel(station=dfm_pnts.index)
 
         ds_county.attrs["County"] = county_name
-
         # Output the dataset for this county
         ds_county.to_netcdf(
             os.path.join(
