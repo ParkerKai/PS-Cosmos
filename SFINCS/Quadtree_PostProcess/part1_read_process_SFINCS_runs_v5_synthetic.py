@@ -344,189 +344,193 @@ def main():
                 # ===============================================================================
                 # Calculate the maximums
                 # ===============================================================================
-
+            
                 r = "72h"  # Deculstering time window for POT (e.g., 24h, 48h, etc.)
                 num_exce = total_years
                 num_grid = ds["nmesh2d_face"].size
 
-                # Initialize output arrays
-                tzsmax_out = np.empty((num_grid, num_exce), dtype="datetime64[ns]")
-
-                zsmax_out = np.empty((num_grid, num_exce), dtype=np.float32)
-
-                # create a mask to identify stations with all NaN or all zero values across time
-                mask_all_nan = (
-                    ds["zsmax"].isnull().all(dim="timemax")
-                )  # True where every time step is NaN for each face
-                mask_all_zero = (ds["zsmax"].fillna(0) == 0).all(dim="timemax")
-                mask_all_neg = (
-                    (ds["zsmax"] < -100)
-                    .where(ds["zsmax"].notnull(), True)
-                    .all(dim="timemax")
-                )
-
-                # Combined mask of good data
-                mask = ~(mask_all_nan | mask_all_zero | mask_all_neg)
-
-                print(
-                    f"{np.sum(~mask).values} stations out of {mask.shape} have all NaN, zero, or negative values and will be skipped."
-                )
-
-                # Run through the grid faces and use POT to find maximums
-                faces = ds["nmesh2d_face"].values
-                nfaces = faces.size
-
-                # Preallocate outputs
-                exceedance = np.arange(num_exce)
-
-                
-                tzsmax_out = xr.DataArray(
-                    np.full(
-                        (nfaces, num_exce),
-                        np.datetime64("NaT", "ns"),
-                        dtype="datetime64[ns]"
-                    ),
-                    dims=("nmesh2d_face", "exceedance"),
-                    coords={"nmesh2d_face": faces, "exceedance": exceedance},
-                    name="tzsmax",
-                )
-
-                zsmax_out = xr.DataArray(
-                    np.full((nfaces, num_exce), np.nan, dtype=float),
-                    dims=("nmesh2d_face", "exceedance"),
-                    coords={"nmesh2d_face": faces, "exceedance": exceedance},
-                    name="zsmax",
-                )
-
-                threshold_out = xr.DataArray(
-                    np.full(nfaces, np.nan, dtype=float),
-                    dims=("nmesh2d_face",),
-                    coords={"nmesh2d_face": faces},
-                    name="zs_threshold",
-                )
-
-                # Run through the grid faces and use POT to find maximums
-                for station in ds["nmesh2d_face"]:
-                    if mask.sel(nmesh2d_face=station):
-                        pull = ds["zsmax"].sel(nmesh2d_face=station)
-
-                        th = pot_threshold_set_num_xr(
-                            pull,
-                            r=r,
-                            num_exce=num_exce,
-                            time_dim="timemax",
-                            strategy="closest",
-                        )
-
-                        threshold_out.loc[dict(nmesh2d_face=station)] = (
-                            float(th.values) if hasattr(th, "values") else float(th)
-                        )
-
-                        extremes = get_extremes_pot_xr(
-                            pull, th, r=r, time_dim="timemax", num_exce=num_exce
-                        )
-
-                                            
-                        # 3) Write exactly num_exce entries (pad with NaN/NaT if fewer available)
-                        k = extremes.sizes.get("timemax", 0)
-
-                        if k < num_exce:
-                            pad_times = np.full(num_exce - k, np.datetime64("NaT"))
-                            pad_vals = np.full(num_exce - k, np.nan)
-
-                            times_full = np.concatenate([extremes["timemax"].values, pad_times])
-                            vals_full = np.concatenate([extremes.values, pad_vals])
-                        else:
-                            times_full = extremes["timemax"].values[:num_exce]
-                            vals_full = extremes.values[:num_exce]
-
-                        tzsmax_out.loc[dict(nmesh2d_face=station, exceedance=slice(0, num_exce))] = times_full
-                        zsmax_out.loc[dict(nmesh2d_face=station, exceedance=slice(0, num_exce))] = vals_full
-
-
-                # --- Build Dataset ---
-                ds_maxes = xr.Dataset(
-                    {
-                        "tzsmax": tzsmax_out,  # datetime64, shape (nmesh2d_face, exceedance)
-                        "zsmax": zsmax_out,  # float,       shape (nmesh2d_face, exceedance)
-                        "zs_threshold": threshold_out,  # float,       shape (nmesh2d_face,)
-                    },
-                    coords={
-                        "nmesh2d_face": faces,
-                        "exceedance": exceedance,
-                    },
-                )
-
-                # Other variables at the same exceedance times
-                # We want values of other variables at the POT times for each face.
-                if len(vars_to_keep) > 1:
-                    for var in vars_to_keep[1:]:
-                        # Output array for this var aligned to (face, exceedance)
-                        var_out = xr.DataArray(
-                            np.full((nfaces, num_exce), np.nan, dtype=float),
-                            dims=("nmesh2d_face", "exceedance"),
-                            coords={"nmesh2d_face": faces, "exceedance": exceedance},
-                            name=var,
-                        )
-                        # Fill per face using tzsmax_out times
-                        for station in faces:
-                            tvals = tzsmax_out.sel(
-                                nmesh2d_face=station
-                            ).values  # (num_exce,)
-                            valid = ~np.isnat(tvals)
-                            if not np.any(valid):
-                                continue
-
-                            # Select variable values at the extreme times for *this* face.
-                            v_face = ds[var].sel(nmesh2d_face=station)
-                            vsel = v_face.sel(
-                                timemax=xr.DataArray(tvals[valid], dims=["exceedance"])
-                            )
-
-                            var_out.loc[
-                                dict(nmesh2d_face=station, exceedance=np.where(valid)[0])
-                            ] = vsel.values
-
-                        ds_maxes[var] = var_out
-
-                # --- Attributes---
-                ds_maxes["tzsmax"].attrs.update(
-                    {
-                        "long_name": "Times of top POT exceedances for zsmax",
-                        "standard_name": "time",
-                    }
-                )
-                ds_maxes["zsmax"].attrs.update(
-                    {
-                        "long_name": "Values of top POT exceedances for zsmax",
-                        "units": "m",
-                    }
-                )
-                ds_maxes["zs_threshold"].attrs.update(
-                    {
-                        "long_name": "POT threshold applied to zsmax per face",
-                        "units": "m",
-                    }
-                )
-                ds_maxes.attrs.update(
-                    {
-                        "title": "Peaks Over Threshold (POT) extremes per mesh face",
-                        "source": "Computed from ds['zsmax'] using pot_threshold_set_num_xr & get_extremes_pot_xr",
-                        "num_exceedances": num_exce,
-                        "declustering_r": r,
-                    }
-                )
-
-                # Export in case we want this for later.
-
                 folder_out = os.path.join(destout,'PostProcess', county, TMP_string)
                 if not os.path.exists(folder_out):
                     os.makedirs(folder_out)
+                
+                if not os.path.exists(os.path.join(folder_out, "POT_Maxes.nc")):
+                
+                    # Initialize output arrays
+                    tzsmax_out = np.empty((num_grid, num_exce), dtype="datetime64[ns]")
 
-                ds_maxes.to_netcdf(
-                    os.path.join(folder_out, "POT_Maxes.nc")
-                )
+                    zsmax_out = np.empty((num_grid, num_exce), dtype=np.float32)
 
+                    # create a mask to identify stations with all NaN or all zero values across time
+                    mask_all_nan = (
+                        ds["zsmax"].isnull().all(dim="timemax")
+                    )  # True where every time step is NaN for each face
+                    mask_all_zero = (ds["zsmax"].fillna(0) == 0).all(dim="timemax")
+                    mask_all_neg = (
+                        (ds["zsmax"] < -100)
+                        .where(ds["zsmax"].notnull(), True)
+                        .all(dim="timemax")
+                    )
+
+                    # Combined mask of good data
+                    mask = ~(mask_all_nan | mask_all_zero | mask_all_neg)
+
+                    print(
+                        f"{np.sum(~mask).values} stations out of {mask.shape} have all NaN, zero, or negative values and will be skipped."
+                    )
+
+                    # Run through the grid faces and use POT to find maximums
+                    faces = ds["nmesh2d_face"].values
+                    nfaces = faces.size
+
+                    # Preallocate outputs
+                    exceedance = np.arange(num_exce)
+
+                    
+                    tzsmax_out = xr.DataArray(
+                        np.full(
+                            (nfaces, num_exce),
+                            np.datetime64("NaT", "ns"),
+                            dtype="datetime64[ns]"
+                        ),
+                        dims=("nmesh2d_face", "exceedance"),
+                        coords={"nmesh2d_face": faces, "exceedance": exceedance},
+                        name="tzsmax",
+                    )
+
+                    zsmax_out = xr.DataArray(
+                        np.full((nfaces, num_exce), np.nan, dtype=float),
+                        dims=("nmesh2d_face", "exceedance"),
+                        coords={"nmesh2d_face": faces, "exceedance": exceedance},
+                        name="zsmax",
+                    )
+
+                    threshold_out = xr.DataArray(
+                        np.full(nfaces, np.nan, dtype=float),
+                        dims=("nmesh2d_face",),
+                        coords={"nmesh2d_face": faces},
+                        name="zs_threshold",
+                    )
+
+                    # Run through the grid faces and use POT to find maximums
+                    for station in ds["nmesh2d_face"]:
+                        if mask.sel(nmesh2d_face=station):
+                            pull = ds["zsmax"].sel(nmesh2d_face=station)
+
+                            th = pot_threshold_set_num_xr(
+                                pull,
+                                r=r,
+                                num_exce=num_exce,
+                                time_dim="timemax",
+                                strategy="closest",
+                            )
+
+                            threshold_out.loc[dict(nmesh2d_face=station)] = (
+                                float(th.values) if hasattr(th, "values") else float(th)
+                            )
+
+                            extremes = get_extremes_pot_xr(
+                                pull, th, r=r, time_dim="timemax", num_exce=num_exce
+                            )
+
+                                                
+                            # 3) Write exactly num_exce entries (pad with NaN/NaT if fewer available)
+                            k = extremes.sizes.get("timemax", 0)
+
+                            if k < num_exce:
+                                pad_times = np.full(num_exce - k, np.datetime64("NaT"))
+                                pad_vals = np.full(num_exce - k, np.nan)
+
+                                times_full = np.concatenate([extremes["timemax"].values, pad_times])
+                                vals_full = np.concatenate([extremes.values, pad_vals])
+                            else:
+                                times_full = extremes["timemax"].values[:num_exce]
+                                vals_full = extremes.values[:num_exce]
+
+                            tzsmax_out.loc[dict(nmesh2d_face=station, exceedance=slice(0, num_exce))] = times_full
+                            zsmax_out.loc[dict(nmesh2d_face=station, exceedance=slice(0, num_exce))] = vals_full
+
+
+                    # --- Build Dataset ---
+                    ds_maxes = xr.Dataset(
+                        {
+                            "tzsmax": tzsmax_out,  # datetime64, shape (nmesh2d_face, exceedance)
+                            "zsmax": zsmax_out,  # float,       shape (nmesh2d_face, exceedance)
+                            "zs_threshold": threshold_out,  # float,       shape (nmesh2d_face,)
+                        },
+                        coords={
+                            "nmesh2d_face": faces,
+                            "exceedance": exceedance,
+                        },
+                    )
+
+                    # Other variables at the same exceedance times
+                    # We want values of other variables at the POT times for each face.
+                    if len(vars_to_keep) > 1:
+                        for var in vars_to_keep[1:]:
+                            # Output array for this var aligned to (face, exceedance)
+                            var_out = xr.DataArray(
+                                np.full((nfaces, num_exce), np.nan, dtype=float),
+                                dims=("nmesh2d_face", "exceedance"),
+                                coords={"nmesh2d_face": faces, "exceedance": exceedance},
+                                name=var,
+                            )
+                            # Fill per face using tzsmax_out times
+                            for station in faces:
+                                tvals = tzsmax_out.sel(
+                                    nmesh2d_face=station
+                                ).values  # (num_exce,)
+                                valid = ~np.isnat(tvals)
+                                if not np.any(valid):
+                                    continue
+
+                                # Select variable values at the extreme times for *this* face.
+                                v_face = ds[var].sel(nmesh2d_face=station)
+                                vsel = v_face.sel(
+                                    timemax=xr.DataArray(tvals[valid], dims=["exceedance"])
+                                )
+
+                                var_out.loc[
+                                    dict(nmesh2d_face=station, exceedance=np.where(valid)[0])
+                                ] = vsel.values
+
+                            ds_maxes[var] = var_out
+
+                    # --- Attributes---
+                    ds_maxes["tzsmax"].attrs.update(
+                        {
+                            "long_name": "Times of top POT exceedances for zsmax",
+                            "standard_name": "time",
+                        }
+                    )
+                    ds_maxes["zsmax"].attrs.update(
+                        {
+                            "long_name": "Values of top POT exceedances for zsmax",
+                            "units": "m",
+                        }
+                    )
+                    ds_maxes["zs_threshold"].attrs.update(
+                        {
+                            "long_name": "POT threshold applied to zsmax per face",
+                            "units": "m",
+                        }
+                    )
+                    ds_maxes.attrs.update(
+                        {
+                            "title": "Peaks Over Threshold (POT) extremes per mesh face",
+                            "source": "Computed from ds['zsmax'] using pot_threshold_set_num_xr & get_extremes_pot_xr",
+                            "num_exceedances": num_exce,
+                            "declustering_r": r,
+                        }
+                    )
+
+                    ds_maxes.to_netcdf(
+                        os.path.join(folder_out, "POT_Maxes.nc")
+                    )
+                    
+                else:
+                    print("POT_Maxes.nc already exists, loading from disk.")
+                    ds_maxes = xr.open_dataset(os.path.join(folder_out, "POT_Maxes.nc"))
+                    
                 # ===============================================================================
                 # Get the specific return periods we want
                 # ===============================================================================
@@ -757,8 +761,6 @@ def main():
                         ds_out["zsmax"].attrs["long_name"] = "maximum_water_level"
                         ds_out["zsmax"].attrs["coordinates"] = "nmesh2d_face"
 
-                        ds_out["tmax_zs"] = (coords, np.squeeze(tmax_zs_out[:, t]))
-
                         # Optionally add qmax and tmax if include_qmax and include_tmax are set to 1
                         if include_qmax:
                             data_out_now = np.squeeze(qmax_out[t, :, :])
@@ -788,7 +790,7 @@ def main():
                         ds_out["y"].attrs["Projection"] = "UTM zone 10N"
 
                         ############ TZSMAX ############
-                        ds_out["tmax_zs"] = (coords, np.squeeze(tmax_zs_out[:, t]))
+                        ds_out["tmax_zs"] = (coords, np.squeeze(tzsmax_out[:, t]))
                         ds_out["tmax_zs"].attrs["units"] = "date"
                         ds_out["tmax_zs"].attrs["standard_name"] = (
                             "time_of_maximum_sea_surface_height_above_mean_sea_level"
