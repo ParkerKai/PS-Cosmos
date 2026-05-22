@@ -192,7 +192,7 @@ def main():
 
     # Number of cpus to put into the cluster.
     # n = os.cpu_count() or 1
-    n = 10
+    n = 4
 
     # Packing information
 
@@ -309,6 +309,8 @@ def main():
     # Tide for some reason starts at 1940 rather than 1941
     ds_tidal = ds_tidal.sel(time=slice(ds_full["time"][0], ds_full["time"][-1]))
 
+
+    asdf
     # ===============================================================================
     # Process and convert to new dataset
     # ===============================================================================
