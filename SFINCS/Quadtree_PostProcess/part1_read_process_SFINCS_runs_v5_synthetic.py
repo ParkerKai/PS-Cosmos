@@ -175,17 +175,14 @@ def main():
     counties = ["03_Kitsap"]
     sub_categories = ["_median"]  # ,'_low','_high'
 
-
     # Choose the data variables you want to keep
     # Define at module scope (important for Dask pickling when parallel=True)
     vars_to_keep: Sequence[str] | None = ["zsmax"]
     coords_to_keep: Sequence[str] | None = ["timemax"]
 
-
     # Some processing of the inputs
     return_period_wanted = [int(RP) for RP in return_period_wanted]
     sub_categories = [sub.replace("_median", "") for sub in sub_categories]
-
 
     # User settings
     # return_period_wanted    = [1, 2, 5, 10, 20, 50, 100]     # number of years requested
@@ -198,7 +195,6 @@ def main():
     # Number of cpus to put into the cluster.
     # n = os.cpu_count() or 1
     n = 10
-
 
     # ===============================================================================
     # Dask Startup
@@ -241,7 +237,6 @@ def main():
     if include_tmax:
         vars_to_keep.append("tmax")
 
-
     # ===============================================================================
     # Load the data
     # ===============================================================================
@@ -267,9 +262,12 @@ def main():
                 # ===============================================================================
 
                 # Get list of files for the run
-                dirs = [entry.name for entry in os.scandir(destin_TMP) if entry.is_dir()]
+                dirs = [
+                    entry.name for entry in os.scandir(destin_TMP) if entry.is_dir()
+                ]
                 files = [
-                    os.path.join(destin_TMP, dir_pull, "sfincs_map.nc") for dir_pull in dirs
+                    os.path.join(destin_TMP, dir_pull, "sfincs_map.nc")
+                    for dir_pull in dirs
                 ]
 
                 # Check the files before we try to combine them.
@@ -304,13 +302,13 @@ def main():
 
                 # Automatically trim to the most common year (mode) if you don't pass year/start/end.
                 # If multiple years tie (same count), choose the earliest; set tie_break='latest' to prefer the latest.
-                
+
                 preprocess_trim = partial(
                     preprocess_,
                     vars_to_keep=vars_to_keep,
                     coords_to_keep=coords_to_keep,
                     mode_year_if_unspecified=True,
-                    tie_break="earliest", # or 'latest'
+                    tie_break="earliest",  # or 'latest'
                     # Optional: force the time coordinate name if you know it
                     # time_name="time",
                 )
@@ -328,15 +326,13 @@ def main():
                     decode_cf=True,
                     preprocess=preprocess_trim,  # you can keep trimming/sanitizing
                     engine="netcdf4",
-                    chunks = chunks,
+                    chunks=chunks,
                 )
-
 
                 ds = ensure_unique_sorted_time(ds, time_name="timemax", keep="first")
 
                 # Persist once so repeated indexing doesn’t re-create the graph
                 ds = ds.persist()
-
 
                 # Load the bedlevel
                 xc, yc, zb = load_SfincsQuadtree(os.path.join(destin_TMP, "sfincs.nc"))
@@ -344,17 +340,16 @@ def main():
                 # ===============================================================================
                 # Calculate the maximums
                 # ===============================================================================
-            
+
                 r = "72h"  # Deculstering time window for POT (e.g., 24h, 48h, etc.)
                 num_exce = total_years
                 num_grid = ds["nmesh2d_face"].size
 
-                folder_out = os.path.join(destout,'PostProcess', county, TMP_string)
+                folder_out = os.path.join(destout, "PostProcess", county, TMP_string)
                 if not os.path.exists(folder_out):
                     os.makedirs(folder_out)
-                
+
                 if not os.path.exists(os.path.join(folder_out, "POT_Maxes.nc")):
-                
                     # Initialize output arrays
                     tzsmax_out = np.empty((num_grid, num_exce), dtype="datetime64[ns]")
 
@@ -385,12 +380,11 @@ def main():
                     # Preallocate outputs
                     exceedance = np.arange(num_exce)
 
-                    
                     tzsmax_out = xr.DataArray(
                         np.full(
                             (nfaces, num_exce),
                             np.datetime64("NaT", "ns"),
-                            dtype="datetime64[ns]"
+                            dtype="datetime64[ns]",
                         ),
                         dims=("nmesh2d_face", "exceedance"),
                         coords={"nmesh2d_face": faces, "exceedance": exceedance},
@@ -432,7 +426,6 @@ def main():
                                 pull, th, r=r, time_dim="timemax", num_exce=num_exce
                             )
 
-                                                
                             # 3) Write exactly num_exce entries (pad with NaN/NaT if fewer available)
                             k = extremes.sizes.get("timemax", 0)
 
@@ -440,15 +433,24 @@ def main():
                                 pad_times = np.full(num_exce - k, np.datetime64("NaT"))
                                 pad_vals = np.full(num_exce - k, np.nan)
 
-                                times_full = np.concatenate([extremes["timemax"].values, pad_times])
+                                times_full = np.concatenate(
+                                    [extremes["timemax"].values, pad_times]
+                                )
                                 vals_full = np.concatenate([extremes.values, pad_vals])
                             else:
                                 times_full = extremes["timemax"].values[:num_exce]
                                 vals_full = extremes.values[:num_exce]
 
-                            tzsmax_out.loc[dict(nmesh2d_face=station, exceedance=slice(0, num_exce))] = times_full
-                            zsmax_out.loc[dict(nmesh2d_face=station, exceedance=slice(0, num_exce))] = vals_full
-
+                            tzsmax_out.loc[
+                                dict(
+                                    nmesh2d_face=station, exceedance=slice(0, num_exce)
+                                )
+                            ] = times_full
+                            zsmax_out.loc[
+                                dict(
+                                    nmesh2d_face=station, exceedance=slice(0, num_exce)
+                                )
+                            ] = vals_full
 
                     # --- Build Dataset ---
                     ds_maxes = xr.Dataset(
@@ -456,6 +458,7 @@ def main():
                             "tzsmax": tzsmax_out,  # datetime64, shape (nmesh2d_face, exceedance)
                             "zsmax": zsmax_out,  # float,       shape (nmesh2d_face, exceedance)
                             "zs_threshold": threshold_out,  # float,       shape (nmesh2d_face,)
+                            "mask": mask,  # boolean,     shape (nmesh2d_face,)
                         },
                         coords={
                             "nmesh2d_face": faces,
@@ -471,7 +474,10 @@ def main():
                             var_out = xr.DataArray(
                                 np.full((nfaces, num_exce), np.nan, dtype=float),
                                 dims=("nmesh2d_face", "exceedance"),
-                                coords={"nmesh2d_face": faces, "exceedance": exceedance},
+                                coords={
+                                    "nmesh2d_face": faces,
+                                    "exceedance": exceedance,
+                                },
                                 name=var,
                             )
                             # Fill per face using tzsmax_out times
@@ -486,11 +492,16 @@ def main():
                                 # Select variable values at the extreme times for *this* face.
                                 v_face = ds[var].sel(nmesh2d_face=station)
                                 vsel = v_face.sel(
-                                    timemax=xr.DataArray(tvals[valid], dims=["exceedance"])
+                                    timemax=xr.DataArray(
+                                        tvals[valid], dims=["exceedance"]
+                                    )
                                 )
 
                                 var_out.loc[
-                                    dict(nmesh2d_face=station, exceedance=np.where(valid)[0])
+                                    dict(
+                                        nmesh2d_face=station,
+                                        exceedance=np.where(valid)[0],
+                                    )
                                 ] = vsel.values
 
                             ds_maxes[var] = var_out
@@ -514,6 +525,12 @@ def main():
                             "units": "m",
                         }
                     )
+                    ds_maxes["mask"].attrs.update(
+                        {
+                            "long_name": "mask for real data values per face",
+                            "units": "Boolean  (True=good data, False=all NaN/zero/negative)",
+                        }
+                    )
                     ds_maxes.attrs.update(
                         {
                             "title": "Peaks Over Threshold (POT) extremes per mesh face",
@@ -523,14 +540,13 @@ def main():
                         }
                     )
 
-                    ds_maxes.to_netcdf(
-                        os.path.join(folder_out, "POT_Maxes.nc")
-                    )
-                    
+                    ds_maxes.to_netcdf(os.path.join(folder_out, "POT_Maxes.nc"))
+
                 else:
                     print("POT_Maxes.nc already exists, loading from disk.")
                     ds_maxes = xr.open_dataset(os.path.join(folder_out, "POT_Maxes.nc"))
-                    
+                    mask = ds_maxes["mask"].values.astype(bool)
+
                 # ===============================================================================
                 # Get the specific return periods we want
                 # ===============================================================================
@@ -582,7 +598,9 @@ def main():
                         r_axis_found = r_axis[nearest_indices]
 
                         # And now also interpolate with log
-                        log_r_axis = np.log10(r_axis)  # Take the logarithm of x-axis values
+                        log_r_axis = np.log10(
+                            r_axis
+                        )  # Take the logarithm of x-axis values
                         log_r_axis[0] = 0.0  # Trick to get to yearly
                         log_return_period_wanted = np.log10(
                             return_period_wanted
@@ -686,7 +704,10 @@ def main():
                     # Flow velocity
                     if include_qmax == 1:
                         p2 = axs[0, 1].scatter(
-                            xc / 1000, yc / 1000, np.squeeze(qmax_out[:, t]), cmap="Reds"
+                            xc / 1000,
+                            yc / 1000,
+                            np.squeeze(qmax_out[:, t]),
+                            cmap="Reds",
                         )
                         axs[0, 1].set_title("Velocity")
                         plt.colorbar(p2, ax=axs[0, 1])
@@ -720,7 +741,7 @@ def main():
                     # Print this
                     fname = "overview_" + str(return_period_wanted[t]) + "yr.png"
                     fname = os.path.join(folder_out, fname)
-                    fig.savefig(fname, dpi=200, bbox_inches='tight')
+                    fig.savefig(fname, dpi=200, bbox_inches="tight")
                     plt.close()
 
                     # Make one large figure for zsmax only
@@ -748,7 +769,9 @@ def main():
                         # Make base
                         ds_out = xr.Dataset()
                         coords = "nmesh2d_face"
-                        ds_out.coords["nmesh2d_face"] = ds["zsmax"].coords["nmesh2d_face"]
+                        ds_out.coords["nmesh2d_face"] = ds["zsmax"].coords[
+                            "nmesh2d_face"
+                        ]
 
                         ############ ZSMAX ############
                         ds_out["zsmax"] = (coords, np.float32(zsmax_out_now))
@@ -821,7 +844,9 @@ def main():
                         wet_dry = np.where(np.isnan(zsmax_out_now), 0, 1)
                         ds_out = xr.Dataset()
                         coords = "nmesh2d_face"
-                        ds_out.coords["nmesh2d_face"] = ds["zsmax"].coords["nmesh2d_face"]
+                        ds_out.coords["nmesh2d_face"] = ds["zsmax"].coords[
+                            "nmesh2d_face"
+                        ]
 
                         ds_out["wetdry"] = (coords, np.float32(wet_dry))
                         filename = (
@@ -836,7 +861,6 @@ def main():
                 print(f"done with this iteration - {folder_out}", flush=True)
 
         # Done with this particular counties
-
 
     # Done with the script
     print("done!")
