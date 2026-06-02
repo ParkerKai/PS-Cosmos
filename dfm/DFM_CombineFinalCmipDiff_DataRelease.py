@@ -186,13 +186,13 @@ def main():
 
     dir_ERA5 = os.path.join(r"D:\Kai\DFM", f"ERA5_{SLR}")
     dir_diff = os.path.join(r"D:\Kai\DFM", f"CDF_diff_{SLR}")
-    dir_Tidal = os.path.join(r"D:\Kai\DFM", f"ERA5_{SLR}_Tidal")
+    dir_Tidal = os.path.join(r"D:\Kai\DFM", f"ERA5_{SLR}_Tidal",'ResultsCombined_fixed')
     dir_gis = r"D:\Kai\DFM\GIS"
     dir_out = os.path.join(r"D:\Kai\DFM", f"Combined_{SLR}")
 
     # Number of cpus to put into the cluster.
     # n = os.cpu_count() or 1
-    n = 4
+    n = 10
 
     # Packing information
 
@@ -309,8 +309,6 @@ def main():
     # Tide for some reason starts at 1940 rather than 1941
     ds_tidal = ds_tidal.sel(time=slice(ds_full["time"][0], ds_full["time"][-1]))
 
-
-    asdf
     # ===============================================================================
     # Process and convert to new dataset
     # ===============================================================================
@@ -580,7 +578,6 @@ def main():
 
     ind_county = pd.Index(list(counties.index) + [-999])  # keep an OutOfCounty bucket
 
-    ind_county = ind_county[4::]
     for county in ind_county:
         county_name = (
             counties.loc[county]["COUNTY_norm"] if county != -999 else "OutOfCounty"

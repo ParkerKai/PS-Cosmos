@@ -35,9 +35,9 @@ import math
 #===============================================================================
 
 #### Directories #####
-dir_data = r'Y:\PS_Cosmos\02_models\DFM_Regional\ERA5_Results\Results'
+dir_data = r'D:\Kai\DFM\ERA5_300_Tidal\Results'
 #dir_out  = r'C:\Users\kaparker\Documents\Data\Temp\Example_DFMfiles'
-dir_out = r'Y:\PS_Cosmos\02_models\DFM_Regional\ERA5_Results\Results_Combined';
+dir_out = r'D:\Kai\DFM\ERA5_300_Tidal\ResultsCombined_fixed'
 
 # buffer
 # Add the is to the front and end of the timeseries as a spinup buffer and
@@ -216,12 +216,10 @@ for ii in range(yr_breaks.shape[0]):
             # Combine for saving
             wl_save = np.vstack((part1_wl,part2_wl,part3_wl))
             time_save = np.hstack((part1_t,part2_t,part3_t))
-            
-            
-
-#===============================================================================
-# %% Output as  netc
-#===============================================================================
+                
+    #===============================================================================
+    # Output as  netc
+    #===============================================================================
 
     print('Outputting Chunk {}'.format(yr_breaks[ii]))
     
