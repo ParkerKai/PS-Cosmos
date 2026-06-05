@@ -25,48 +25,130 @@ import geopandas as gpd
 import scipy.stats as stats
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
+import matplotlib.font_manager as fm
+from matplotlib.ticker import FuncFormatter
 
 # ===============================================================================
 # %% User Defined inputs
 # ===============================================================================
 # Directory where the DFM data resides
 # dir_in = r'D:\DFM'
-dir_in_wl = r"Y:\PS_Cosmos\GIS\DFM\DFM_CmipDiff_byModel"
-dir_in_wv = r"Y:\PS_Cosmos\GIS\Waves\Wave_CmipDiff_byModel"
+# dir_in_wl = r"Y:\PS_Cosmos\GIS\DFM\DFM_CmipDiff_byModel"
+# dir_in_wv = r"Y:\PS_Cosmos\GIS\Waves\Wave_CmipDiff_byModel"
+dir_in_wl = r"C:\Users\kai\Documents\KaiData4Figures\DFM_CmipDiff_byModel"
+dir_in_wv = r"C:\Users\kai\Documents\KaiData4Figures\Wave_CmipDiff_byModel"
 
-dir_out = r"Y:\PS_Cosmos\Figures\Paper"
+# dir_out = r"Y:\PS_Cosmos\Figures\Paper"
+dir_out = r"C:\Users\kai\Documents\KaiData4Figures\FinalFigs"
 
 
 # SLR_list =['000','025','050','100','150','200','300']
 SLR_list = ["000"]
 
 # Metric to plot
-metric = "RP_30"
+metric = "RI_1"
 
 # ===============================================================================
 # %% Define some functions
 # ===============================================================================
 
 
+def add_scalebar_lonlat(
+    ax,
+    length_km=50,
+    loc="lower right",
+    pad=0.3,
+    color="k",
+    size_vertical=0,
+    text_size=8,
+):
+    """
+    Draws a horizontal scalebar of `length_km` on a lon/lat axis.
+    The bar length (in degrees of longitude) is computed at the axis mid-latitude.
+    """
+    y0, y1 = ax.get_ylim()
+    lat_c = 0.5 * (y0 + y1)
+
+    # meters per degree longitude at latitude lat_c
+    m_per_deg_lon = 111_320.0 * np.cos(np.deg2rad(lat_c))
+    length_deg = (length_km * 1000.0) / m_per_deg_lon
+
+    fontprops = fm.FontProperties(size=text_size)
+    sb = AnchoredSizeBar(
+        ax.transData,
+        length_deg,
+        f"{length_km} km",
+        loc,
+        pad=pad,
+        color=color,
+        frameon=True,
+        alpha=0.6,
+        size_vertical=size_vertical,
+        fontproperties=fontprops,
+    )
+    ax.add_artist(sb)
+    return sb
+
+
+def deg_fmt(y, pos):
+    return f"{y:0.2f}°"  # or integer degrees: f"{int(round(y))}°"
+
+
+def use_light_figures():
+    import matplotlib as mpl
+    import matplotlib.pyplot as plt
+
+    plt.style.use("default")
+    mpl.rcParams.update(
+        {
+            "figure.facecolor": "white",
+            "axes.facecolor": "white",
+            "savefig.facecolor": "white",
+            "text.color": "black",
+            "axes.labelcolor": "black",
+            "xtick.color": "black",
+            "ytick.color": "black",
+            "axes.edgecolor": "black",
+        }
+    )
+
+
 # ===============================================================================
 # %% Load general data
 # ===============================================================================
 
+# # Load state shapefiles.
+# cnty = gpd.read_file(
+#     r"Y:\PS_Cosmos\GIS\general\Washington_Counties_with_Natural_Shoreline___washsh_area.shp"
+# )
+
+# # Load in the landmass file
+# lm = gpd.read_file(
+#     r"Y:\PS_Cosmos\GIS\general\PoliticalBoundaries_Shapefile\NA_PoliticalDivisions\data\bound_p\boundaries_p_2021_v3.shp"
+# )
+
+
+# # Load in the basin file
+# mask  = gpd.read_file(
+#     r"Y:\PS_Cosmos\GIS\Shapefiles\general\SalishSea_Basins.shp"
+# )
+
+
 # Load state shapefiles.
 cnty = gpd.read_file(
-    r"Y:\PS_Cosmos\GIS\general\Washington_Counties_with_Natural_Shoreline___washsh_area.shp"
+    r"C:\Users\kai\Documents\KaiData4Figures\Washington_Counties_with_Natural_Shoreline___washsh_area.shp"
 )
 
 # Load in the landmass file
 lm = gpd.read_file(
-    r"Y:\PS_Cosmos\GIS\general\PoliticalBoundaries_Shapefile\NA_PoliticalDivisions\data\bound_p\boundaries_p_2021_v3.shp"
+    r"C:\Users\kai\Documents\KaiData4Figures\bound_p\boundaries_p_2021_v3.shp"
 )
 
 
 # Load in the basin file
-mask  = gpd.read_file(
-    r"Y:\PS_Cosmos\GIS\Shapefiles\general\SalishSea_Basins.shp"
-)
+mask = gpd.read_file(r"C:\Users\kai\Documents\KaiData4Figures\SalishSea_Basins.shp")
+
 
 # Dissolve into a single (multi)polygon to avoid edges between parts
 mask_union = mask.dissolve()  # single row with unified geometry
@@ -191,14 +273,17 @@ plot_data_sig_wv = plot_data_wv.iloc[sign, :]
 # %% Plot the  data
 # ===============================================================================
 
-# Filter geographically 
+
+use_light_figures()
+
+
+# Filter geographically
 
 plot_data_wl = gpd.clip(plot_data_wl, mask_union)
 plot_data_wv = gpd.clip(plot_data_wv, mask_union)
 
 plot_data_sig_wl = gpd.clip(plot_data_sig_wl, mask_union)
 plot_data_sig_wv = gpd.clip(plot_data_sig_wv, mask_union)
-
 
 
 lm = lm.to_crs(crs=plot_data_sig_wl.crs)
@@ -210,7 +295,7 @@ if metric == "RI_1":
 elif metric == "RP_30":
     vmin = -0.25
     vmax = 0.25
-    
+
 
 fig, [ax1, ax2] = plt.subplots(
     1, 2, figsize=(10, 7), layout="tight", sharex="row", sharey="row"
@@ -233,7 +318,7 @@ s2 = plot_data_wl.plot(
 
 ax1.set_xlim([-124.75, -122])
 ax1.set_ylim([47, 49.5])
-ax1.grid()
+ax1.grid(True)
 ax1.set_xlabel("Longitude")
 ax1.set_ylabel("Latittude")
 ax1.set_title("CMIP6 Ensemble Change in Water levels")
@@ -252,20 +337,35 @@ s2 = plot_data_wv.plot(
     cmap="coolwarm",
     label="Mean Change",
     vmin=vmin,
-    vmax=vmax)
-    #legend=True, legend_kwds={"label": "Ensemble Mean Change (m)"})
-#)  #                    legend=True, cmap='coolwarm', legend_kwds={"label": "Ensemble Mean Change (m)"},
+    vmax=vmax,
+)
+# legend=True, legend_kwds={"label": "Ensemble Mean Change (m)"})
+# )  #                    legend=True, cmap='coolwarm', legend_kwds={"label": "Ensemble Mean Change (m)"},
 
 
 ax2.set_xlim([-124.75, -122])
 ax2.set_ylim([47, 49.25])
-ax2.grid()
+ax2.grid(True)
 ax2.set_title("CMIP6 Ensemble Change in Wave Height")
-ax2.set_yticklabels([])
+
+ax1.tick_params(axis="y", which="both", labelleft=True)
+ax2.tick_params(axis="y", which="both", labelleft=False)
+
+
+add_scalebar_lonlat(ax1, length_km=50, loc="upper left")  # WL panel
+add_scalebar_lonlat(ax2, length_km=50, loc="upper left")  # Wave panel
+
+ax1.yaxis.set_major_formatter(FuncFormatter(deg_fmt))
+ax1.xaxis.set_major_formatter(FuncFormatter(deg_fmt))
+ax2.yaxis.set_major_formatter(FuncFormatter(deg_fmt))
 
 # elems = ax2.get_children()
 # divider = make_axes_locatable(ax2)
 # cax = divider.append_axes("right", size="5%", pad=0.1)
 # matplotlib.pyplot.colorbar(elems[2], cax=cax)
 
-fig.savefig(os.path.join(dir_out, f"MeanDiff_Map_{metric}_fixed.tiff"), dpi=400)
+fig.savefig(
+    os.path.join(dir_out, f"MeanDiff_Map_{metric}_fixed.tiff"),
+    dpi=400,
+    bbox_inches="tight",
+)

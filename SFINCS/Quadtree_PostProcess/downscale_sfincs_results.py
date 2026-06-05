@@ -32,6 +32,7 @@ from pathlib import Path
 
 import xarray as xr
 import xugrid as xu
+import os 
 
 from hydromt_sfincs import SfincsModel
 from hydromt_sfincs.workflows import downscaling
@@ -39,7 +40,7 @@ from hydromt_sfincs.workflows import downscaling
 import ps_cosmos_postprocess_helper as helper
 
 # Force unbuffered output so VS Code shows prints in real-time
-sys.stdout.reconfigure(line_buffering=True)
+#sys.stdout.reconfigure(line_buffering=True)
 
 
 # =============================================================================
@@ -48,8 +49,8 @@ sys.stdout.reconfigure(line_buffering=True)
 # --- inputs ---
 # Reference SFINCS model (provides the quadtree grid + boundary points).
 # For multi-year aggregation, point `sfincs_dirs` at each water-year run dir.
-sfincs_root     = Path(r"p:\CoSMoS_PS\10_Kitsap\20260526_improve_scripts\2026-05-17-Kitsap")
-bnd_file        = sfincs_root / "sfincs.bnd"
+sfincs_root     = Path(r"D:\Kai\DataDownloads\Snohomish_20260514")
+bnd_file        = os.path.join(sfincs_root,"sfincs.bnd")
 
 # Discover one SFINCS run directory per water year.
 sfincs_dirs = sorted(
@@ -62,11 +63,11 @@ print(f"Found {len(sfincs_dirs)} water-year runs: "
 
 # DEM + index COG
 dem_res         = 1                                # DEM resolution [m]
-dem_file        = Path(r"p:\CoSMoS_PS\10_Kitsap\20260526_improve_scripts\kitsap_DEM\KitsapCo_CoNED_DEMmods_v1.tif")
-indices_fn      = sfincs_root / "downscaled_results_1m" / f"indices_{dem_res}m.tif"
+dem_file        = Path(r"D:\Kai\DataDownloads\Snohomish_MosaicDEM_modded.tif")
+indices_fn      = Path(os.path.join(sfincs_root,"downscaled_results_1m", f"indices_{dem_res}m.tif"))
 
 # Output
-output_dir      = sfincs_root / "downscaled_results_1m"
+output_dir      = Path(os.path.join(sfincs_root, "downscaled_results_1m"))
 domain_stem     = f"_{dem_res}m"
 
 # --- aggregation + EVA ---
@@ -118,12 +119,12 @@ NRMAX           = 2000
 # =============================================================================
 output_dir.mkdir(parents=True, exist_ok=True)
 if aggregation_mode == "annual_max":
-    aggregated_fn = output_dir / "aggregated_annual.nc"
-    timeseries_fn = output_dir / "aggregated_annual.timeseries.nc"
+    aggregated_fn = Path(os.path.join(output_dir, "aggregated_annual.nc"))
+    timeseries_fn = Path(os.path.join(output_dir, "aggregated_annual.timeseries.nc"))
     # POT on annual-max mode needs the sidecar full timeseries
     keep_timeseries = (eva_method == "pot")
 elif aggregation_mode == "all_maxima":
-    aggregated_fn = output_dir / "aggregated_all.nc"
+    aggregated_fn = Path(os.path.join(output_dir, "aggregated_all.nc"))
     timeseries_fn = aggregated_fn          # main file IS the timeseries
     keep_timeseries = False
 else:
@@ -271,7 +272,8 @@ ds_eva = xr.open_dataset(eva_fn)
 # Step 3: Load SFINCS model + build (or reuse) index COG
 # =============================================================================
 print(f"\n{'='*60}\nStep 3: SFINCS model + index COG\n{'='*60}")
-mod = SfincsModel(str(sfincs_root), mode="r")
+
+mod = SfincsModel(str(sfincs_dirs[0]), mode="r")
 print(f"  grid type: {mod.grid_type}")
 
 if not indices_fn.exists():

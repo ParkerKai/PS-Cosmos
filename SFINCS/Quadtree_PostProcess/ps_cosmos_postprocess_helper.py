@@ -92,6 +92,7 @@ def _validate_1d_time_series(da: xr.DataArray, time_dim: str) -> None:
 
 # --- 0b: POT declustering + threshold search --------------------------------
 
+
 def _cluster_extrema_1d(
     values: np.ndarray,
     times: np.ndarray,
@@ -261,7 +262,9 @@ def rp_axis(
 _TIME_CANDIDATES: List[str] = ["timemax", "time", "Time", "t", "datetime", "date"]
 
 
-def _detect_time_coord(ds: xr.Dataset, preferred: Optional[str] = None) -> Optional[str]:
+def _detect_time_coord(
+    ds: xr.Dataset, preferred: Optional[str] = None
+) -> Optional[str]:
     if preferred and preferred in ds.coords:
         return preferred
     for name in _TIME_CANDIDATES:
@@ -281,7 +284,9 @@ def check_nc_file(
     issues: List[str] = []
     summary = {"path": str(path)}
     try:
-        ds = xr.open_dataset(path, decode_cf=True, mask_and_scale=True, engine="netcdf4")
+        ds = xr.open_dataset(
+            path, decode_cf=True, mask_and_scale=True, engine="netcdf4"
+        )
     except Exception as e:
         issues.append(f"OPEN_ERROR: {type(e).__name__}: {e}")
         return False, issues, summary
@@ -367,6 +372,7 @@ def ensure_unique_sorted_time(
 
 # --- 0e: Water-year mode trimming (from part1.preprocess_) ------------------
 
+
 def trim_to_mode_year(
     ds: xr.Dataset,
     time_name: Optional[str] = None,
@@ -396,19 +402,155 @@ def trim_to_mode_year(
 # SECTION 1: Water-year aggregation
 # =============================================================================
 
+# def _open_sfincs_map(
+#     sfincs_dir: Path,
+#     vars_keep: Sequence[str],
+#     time_dim: str,
+# ) -> xr.Dataset:
+#     """Open one SFINCS run's sfincs_map.nc, trim to its mode year, keep vars."""
+#     nc_path = Path(sfincs_dir) / "sfincs_map.nc"
+#     ds = xr.open_dataset(nc_path, decode_cf=True, mask_and_scale=True, engine="netcdf4")
+#     keep = [v for v in vars_keep if v in ds]
+#     if keep:
+#         ds = ds[keep]
+#     ds = trim_to_mode_year(ds, time_name=time_dim)
+#     ds = ensure_unique_sorted_time(ds, time_name=time_dim)
+#     return ds
+
+from pathlib import Path
+from typing import Sequence
+import re
+import numpy as np
+import xarray as xr
+
+
 def _open_sfincs_map(
     sfincs_dir: Path,
     vars_keep: Sequence[str],
     time_dim: str,
 ) -> xr.Dataset:
-    """Open one SFINCS run's sfincs_map.nc, trim to its mode year, keep vars."""
+    """
+    Open one SFINCS run's sfincs_map.nc, sanitize/convert the time coordinate,
+    trim to its mode year, and keep the requested variables.
+    """
+
     nc_path = Path(sfincs_dir) / "sfincs_map.nc"
-    ds = xr.open_dataset(nc_path, decode_cf=True, mask_and_scale=True, engine="netcdf4")
+
+    # 1) Open WITHOUT time decoding to avoid Overflow/OutOfBounds during CF decoding
+    ds = xr.open_dataset(
+        nc_path,
+        decode_cf=True,  # still decode CF for other vars
+        mask_and_scale=True,  # respect scales for data vars
+        engine="netcdf4",
+        decode_times=False,  # IMPORTANT: prevent immediate time decoding
+    )
+
+    # 2) Sanitize and decode the time coordinate named by `time_dim`
+    if time_dim in ds:
+        t = ds[time_dim]
+
+        # --- 2a) Build a mask for bad/fill values ---------------------------------
+        # Common NetCDF float32 fill value used by several tools:
+        COMMON_FILL = np.float32(9.96921e36)
+
+        # Read declared fill/missing markers if present
+        declared_fill = t.attrs.get("_FillValue", t.attrs.get("missing_value", None))
+
+        # Work with float for safety; ints can overflow on comparators
+        t_float = t.astype("float64")
+
+        # Define a generous threshold: 1e12 seconds ≈ 31,688 years
+        # Adjust if you want tighter bounds
+        max_seconds = 1e12
+
+        mask = ~np.isfinite(t_float)
+        mask |= t_float == COMMON_FILL
+        if declared_fill is not None:
+            # If declared_fill is an array, compare elementwise; if scalar, broadcast
+            mask |= t_float == np.asarray(declared_fill, dtype="float64")
+
+        # Mask extreme magnitudes (likely corrupted/fill)
+        mask |= (t_float > max_seconds) | (t_float < -max_seconds)
+
+        # Apply mask; set bad entries to NaN so we can decode safely
+        t_clean = xr.where(~mask, t_float, np.nan)
+
+        # --- 2b) Decode to datetime -----------------------------------------------
+        units = t.attrs.get("units", None)
+        calendar = t.attrs.get("calendar", "standard")  # default
+
+        if not units or "since" not in units:
+            # Fallback: treat values as "seconds since 1970-01-01" if units missing
+            origin = np.datetime64("1970-01-01T00:00:00")
+            t_dt = origin + t_clean.astype("timedelta64[s]")
+        else:
+            # Parse CF units: "<time_units> since <YYYY-MM-DD HH:MM:SS>"
+            # Normalize to ISO "YYYY-MM-DDTHH:MM:SS"
+            try:
+                ref = units.split("since", 1)[1].strip()
+                # Allow "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DD"
+                if " " in ref and "T" not in ref:
+                    ref = ref.replace(" ", "T")
+                origin = np.datetime64(ref)
+            except Exception:
+                # Conservative fallback if units string is odd
+                origin = np.datetime64("1970-01-01T00:00:00")
+
+            # Choose numpy vs cftime path
+            if calendar in ("standard", "gregorian", "proleptic_gregorian", None):
+                # Numpy datetime64 (seconds resolution)
+                t_dt = origin + t_clean.astype("timedelta64[s]")
+            else:
+                # Non-standard calendar: use cftime
+                import cftime
+
+                t_dt = xr.apply_ufunc(
+                    lambda v: np.array(
+                        cftime.num2date(
+                            v.astype("float64"),
+                            units,
+                            calendar,
+                            only_use_cftime_datetimes=True,
+                        )
+                    ),
+                    t_clean,
+                    vectorize=True,
+                    dask="parallelized",
+                    output_dtypes=[object],  # object -> cftime datetime
+                )
+
+        # --- 2c) Attach decoded coord, tidy attrs ---------------------------------
+        ds = ds.assign_coords({time_dim: t_dt})
+        for k in ("units", "calendar"):
+            ds[time_dim].attrs.pop(k, None)
+        ds[time_dim].attrs["standard_name"] = "time"
+        ds[time_dim].attrs["long_name"] = "time"
+
+        # --- 2d) Drop rows where time is invalid (NaT/null) -----------------------
+        # For numpy datetime64, np.isnat works; for cftime, use pandas null check
+        try:
+            if np.issubdtype(ds[time_dim].dtype, np.datetime64):
+                valid = ~np.isnat(ds[time_dim].values)
+            else:
+                # cftime/object dtype
+                import pandas as pd
+
+                valid = ~pd.isnull(ds[time_dim].values)
+            if valid.ndim == 1 and valid.size == ds.sizes[time_dim]:
+                ds = ds.sel({time_dim: valid})
+        except Exception:
+            # If anything goes wrong, keep the dataset; downstream functions may handle
+            pass
+
+    # 3) Keep requested variables (xarray will retain needed coords)
     keep = [v for v in vars_keep if v in ds]
     if keep:
         ds = ds[keep]
+
+    # 4) Your existing pipeline: trim to mode year & ensure unique/sorted time
     ds = trim_to_mode_year(ds, time_name=time_dim)
     ds = ensure_unique_sorted_time(ds, time_name=time_dim)
+
     return ds
 
 
@@ -539,6 +681,7 @@ def aggregate_water_year_maxima(
 # SECTION 2: Extreme value analysis (Weibull / GEV / POT)
 # =============================================================================
 
+
 def eva_weibull(
     da_annual_max: xr.DataArray,
     return_periods: Sequence[float],
@@ -561,8 +704,13 @@ def eva_weibull(
         T_emp = (n + 1.0) / np.arange(1, n + 1, dtype=float)
         log_T_emp = np.log(T_emp[::-1])
         vals_for_T = sorted_desc[::-1]
-        return np.interp(np.log(rp_target), log_T_emp, vals_for_T,
-                         left=vals_for_T[0], right=vals_for_T[-1])
+        return np.interp(
+            np.log(rp_target),
+            log_T_emp,
+            vals_for_T,
+            left=vals_for_T[0],
+            right=vals_for_T[-1],
+        )
 
     out = xr.apply_ufunc(
         _per_cell,
@@ -643,11 +791,17 @@ def eva_pot(
             continue
         try:
             th = pot_threshold_set_num_xr(
-                series, r=decluster_window, num_exce=target_total,
-                time_dim=time_dim, strategy="closest",
+                series,
+                r=decluster_window,
+                num_exce=target_total,
+                time_dim=time_dim,
+                strategy="closest",
             )
             extremes = get_extremes_pot_xr(
-                series, th, r=decluster_window, time_dim=time_dim,
+                series,
+                th,
+                r=decluster_window,
+                time_dim=time_dim,
                 num_exce=target_total,
             )
         except Exception:
@@ -660,8 +814,11 @@ def eva_pot(
         log_T_emp = np.log(T_emp[::-1])
         vals_for_T = v[::-1]
         out_arr[i] = np.interp(
-            np.log(rp_target), log_T_emp, vals_for_T,
-            left=vals_for_T[0], right=vals_for_T[-1],
+            np.log(rp_target),
+            log_T_emp,
+            vals_for_T,
+            left=vals_for_T[0],
+            right=vals_for_T[-1],
         )
 
     return xr.DataArray(
@@ -711,26 +868,34 @@ def eva_apply(
                 f"POT EVA requires at least 2 water years; got n_years={n_years}."
             )
         zsmax_rp = eva_pot(
-            ds_annual["zsmax"], return_periods, n_years=n_years,
-            target_per_year=pot_target_per_year, decluster_window=pot_decluster,
-            time_dim=time_dim, face_dim=face_dim,
+            ds_annual["zsmax"],
+            return_periods,
+            n_years=n_years,
+            target_per_year=pot_target_per_year,
+            decluster_window=pot_decluster,
+            time_dim=time_dim,
+            face_dim=face_dim,
         )
     elif method == "weibull":
         zsmax_rp = eva_weibull(ds_annual["zsmax_ann"], return_periods)
     elif method == "gev":
-        zsmax_rp = eva_gev(ds_annual["zsmax_ann"], return_periods, min_years=gev_min_years)
+        zsmax_rp = eva_gev(
+            ds_annual["zsmax_ann"], return_periods, min_years=gev_min_years
+        )
     elif method == "pot":
         if ds_full_timeseries is None or "zsmax" not in ds_full_timeseries:
             raise ValueError("POT EVA requires `ds_full_timeseries` with `zsmax`.")
-        n_years = int(
-            ds_annual.attrs.get("n_years", ds_annual.sizes.get("year", 0))
-        )
+        n_years = int(ds_annual.attrs.get("n_years", ds_annual.sizes.get("year", 0)))
         if n_years < 2:
             raise ValueError("POT EVA requires at least 2 water years of data.")
         zsmax_rp = eva_pot(
-            ds_full_timeseries["zsmax"], return_periods, n_years=n_years,
-            target_per_year=pot_target_per_year, decluster_window=pot_decluster,
-            time_dim=time_dim, face_dim=face_dim,
+            ds_full_timeseries["zsmax"],
+            return_periods,
+            n_years=n_years,
+            target_per_year=pot_target_per_year,
+            decluster_window=pot_decluster,
+            time_dim=time_dim,
+            face_dim=face_dim,
         )
     else:
         raise ValueError(f"Unknown EVA method {method!r}; use weibull/gev/pot.")
@@ -744,6 +909,7 @@ def eva_apply(
 # =============================================================================
 # SECTION 3: Event-matched extras + quadtree-to-DEM mapping
 # =============================================================================
+
 
 def extras_at_rp_via_rank(
     ds_annual: xr.Dataset,
@@ -777,15 +943,15 @@ def extras_at_rp_via_rank(
         order = np.argsort(-zs_vals, axis=-1, kind="stable")
         ex_sorted = np.take_along_axis(ex_vals, order, axis=-1)
         rank_cols = (k_int - 1).reshape((1,) * (ex_sorted.ndim - 1) + (n_rp,))
-        rank_cols_b = np.broadcast_to(
-            rank_cols, ex_sorted.shape[:-1] + (n_rp,)
-        )
+        rank_cols_b = np.broadcast_to(rank_cols, ex_sorted.shape[:-1] + (n_rp,))
         picked = np.take_along_axis(ex_sorted, rank_cols_b, axis=-1)
         non_year_dims = [d for d in da_extra.dims if d != year_dim]
         coords = {d: da_extra[d] for d in non_year_dims}
         coords["rp"] = rp_target
         out[f"{v}_rp"] = xr.DataArray(
-            picked, dims=tuple(non_year_dims) + ("rp",), coords=coords,
+            picked,
+            dims=tuple(non_year_dims) + ("rp",),
+            coords=coords,
             name=f"{v}_rp",
         )
     return out
@@ -811,15 +977,23 @@ def map_quadtree_to_dem_nearest(
         meta = idx_src.meta.copy()
 
     meta.update(
-        count=1, dtype="float32", nodata=float("nan"),
-        tiled=True, blockxsize=256, blockysize=256,
-        compress="deflate", predictor=2, BIGTIFF="YES",
+        count=1,
+        dtype="float32",
+        nodata=float("nan"),
+        tiled=True,
+        blockxsize=256,
+        blockysize=256,
+        compress="deflate",
+        predictor=2,
+        BIGTIFF="YES",
     )
 
     if depth_mask_fn is not None:
         depth_mask_fn = Path(depth_mask_fn)
-    with rasterio.open(out_fn, "w", **meta) as dst, \
-         rasterio.open(indices_fn) as idx_src:
+    with (
+        rasterio.open(out_fn, "w", **meta) as dst,
+        rasterio.open(indices_fn) as idx_src,
+    ):
         dep_src = rasterio.open(depth_mask_fn) if depth_mask_fn is not None else None
         try:
             for _, window in dst.block_windows(1):
@@ -842,6 +1016,7 @@ def map_quadtree_to_dem_nearest(
 # =============================================================================
 # SECTION 4: Hazard binning + I/O
 # =============================================================================
+
 
 def stamp_provenance(fn: Path, **tags) -> None:
     """Merge `tags` into the GeoTIFF metadata of `fn` (open in r+ mode).
@@ -888,9 +1063,14 @@ def bin_raster(
     with rasterio.open(in_fn) as src:
         meta = src.meta.copy()
         meta.update(
-            dtype="uint8", nodata=255, count=1,
-            tiled=True, blockxsize=256, blockysize=256,
-            compress="deflate", BIGTIFF="YES",
+            dtype="uint8",
+            nodata=255,
+            count=1,
+            tiled=True,
+            blockxsize=256,
+            blockysize=256,
+            compress="deflate",
+            BIGTIFF="YES",
         )
         with rasterio.open(out_fn, "w", **meta) as dst:
             for _, window in src.block_windows(1):
@@ -957,8 +1137,10 @@ def bin_depth_with_overlays(
         )
     n_depth_bins = edges.size
     below_mhhw_code = 1
-    depth_code_offset = 2                              # depth bins -> 2 .. n_depth_bins+1
-    floodprone_code = n_depth_bins + depth_code_offset # next code after the deepest bin
+    depth_code_offset = 2  # depth bins -> 2 .. n_depth_bins+1
+    floodprone_code = (
+        n_depth_bins + depth_code_offset
+    )  # next code after the deepest bin
 
     if floodprone_code >= 255:
         raise ValueError(
@@ -969,21 +1151,28 @@ def bin_depth_with_overlays(
     with rasterio.open(hmax_masked_fn) as src:
         meta = src.meta.copy()
     meta.update(
-        count=1, dtype="uint8", nodata=255,
-        tiled=True, blockxsize=256, blockysize=256,
-        compress="deflate", BIGTIFF="YES",
+        count=1,
+        dtype="uint8",
+        nodata=255,
+        tiled=True,
+        blockxsize=256,
+        blockysize=256,
+        compress="deflate",
+        BIGTIFF="YES",
     )
 
-    with rasterio.open(out_fn, "w", **meta) as dst, \
-         rasterio.open(hmax_masked_fn) as hsrc, \
-         rasterio.open(connection_fn) as csrc, \
-         rasterio.open(dem_fn) as dsrc:
+    with (
+        rasterio.open(out_fn, "w", **meta) as dst,
+        rasterio.open(hmax_masked_fn) as hsrc,
+        rasterio.open(connection_fn) as csrc,
+        rasterio.open(dem_fn) as dsrc,
+    ):
         for _, window in dst.block_windows(1):
             h = hsrc.read(1, window=window).astype(np.float32)
             c = csrc.read(1, window=window)
             d = dsrc.read(1, window=window).astype(np.float32)
 
-            out = np.zeros(h.shape, dtype=np.uint8)            # 0 = dry / default
+            out = np.zeros(h.shape, dtype=np.uint8)  # 0 = dry / default
 
             # nodata: non-finite DEM (outside model domain)
             dem_nodata = ~np.isfinite(d)
@@ -1003,14 +1192,15 @@ def bin_depth_with_overlays(
                 bins[~wet] = 0
                 # np.digitize returns 0 for values below the smallest edge;
                 # shift wet bins (1..N) into the [2..N+1] depth-code range
-                shifted = np.where(bins >= 1, bins + (depth_code_offset - 1), 0).astype(np.uint8)
+                shifted = np.where(bins >= 1, bins + (depth_code_offset - 1), 0).astype(
+                    np.uint8
+                )
                 out[wet] = shifted[wet]
 
             # flood-prone low-lying: connection == 2, but only where NOT
             # below MHHW and NOT already a real depth bin
             disconnected = (
-                (~below) & (~dem_nodata) & (c == 2)
-                & ((out == 0) | (out == 255))
+                (~below) & (~dem_nodata) & (c == 2) & ((out == 0) | (out == 255))
             )
             out[disconnected] = floodprone_code
 
@@ -1032,5 +1222,3 @@ def bin_depth_with_overlays(
         if mhhw_elevation is not None:
             tags["mhhw_elevation_m"] = f"{mhhw_elevation:g}"
         dst.update_tags(**tags)
-
-
