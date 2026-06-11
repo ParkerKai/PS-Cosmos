@@ -32,6 +32,7 @@ from pathlib import Path
 import xarray as xr
 import xugrid as xu
 import os
+import numpy as np
 
 from hydromt_sfincs import SfincsModel
 from hydromt_sfincs.workflows import downscaling
@@ -121,11 +122,28 @@ smooth_size = 5  # sigma for gaussian filter
 #   - "Flood-prone Low-Lying" wherever the Step-5 connection raster == 2
 #     (standing water that was disconnected from the boundary)
 # See helper.bin_depth_with_overlays for the full code mapping.
-depth_bins = [0.0, 0.3048, 0.9144, 1.524]  # < 1ft / 1-3ft / 3-5ft / > 5ft
-depth_labels = ["< 1 ft", "1-3 ft", "3-5 ft", "> 5 ft"]
+
+## Depth  Categories
+depth_bins = {
+    "ID": np.array([1, 2, 3, 4, 5], dtype="int16"),
+    "Category": ["Low", "Medium", "High", "VeryHigh", "Extreme"],
+    "Depth_Label_ft": ["<0.5", "0.5-1.0", "1.0-3.0", "3.0-5.0", ">5.0"],
+    "Depth_Label_m": ["<0.15", "0.15-0.3", "0.3-0.9", "0.9-1.5", ">1.5"],
+    "D_Min": np.array([-np.inf, 0.1524, 0.3048, 0.9144, 1.524]),
+    "D_Max": np.array([0.1524, 0.3048, 0.9144, 1.524, np.inf]),
+}
+
 mhhw_elevation = 2.748  # MHHW [m, NAVD88]; Everett station 9447130, ~2.62 m. Verify against DEM datum.
-qmax_bins = [0.0, 0.3, 0.6, 1.0, 2.0]  # lower edges [m^2/s]
-qmax_labels = ["Low", "Medium", "High", "Very High", "Extreme"]
+
+## Depth Velocity Categories
+qmax_bins = {
+    "ID": np.array([1, 2, 3, 4, 5], dtype="int16"),
+    "Category": ["Low", "Medium", "High", "VeryHigh", "Extreme"],
+    "VD_Label": ["<0.2", "0.2-0.5", "0.5-1.5", "1.5-2.5", ">2.5"],
+    "VD_Min": [0, 0.2, 0.5, 1.5, 2.5],
+    "VD_Max": np.array([0.2, 0.5, 1.5, 2.5, np.inf]),
+}
+
 
 # --- step toggles ---
 run_aggregation = True
@@ -474,8 +492,7 @@ if run_binning:
                 hmax_masked_fn=h_for_bin,
                 connection_fn=c_fn,
                 dem_fn=dem_file,
-                bin_edges=depth_bins,
-                bin_labels=depth_labels,
+                depth_bins=depth_bins,
                 out_fn=d_bins_fn,
                 mhhw_elevation=mhhw_elevation,
             )
@@ -504,7 +521,7 @@ if run_binning:
             print(f"  skip {helper.rp_tag(rp)}/qmax_bins: exists")
         else:
             t0 = time.time()
-            helper.bin_raster(q_fn, qmax_bins, qmax_labels, q_bins_fn)
+            helper.bin_raster(q_fn, qmax_bins, q_bins_fn)
             helper.stamp_provenance(
                 q_bins_fn,
                 **base_tags,
@@ -573,8 +590,12 @@ if run_shapefiles:
                 raster_file=d_bins_fn,
                 vector_file=dbins_shp_fn,
                 connectivity=8,
-                min_pixels=25,  # drop patches < 25 pixels
-                dissolve=True,  # merge polygons by class ID
+                min_pixels=25,              # drop patches < 25 pixels
+                dissolve=True,           # merge polygons by class ID     
+                driver="ESRI Shapefile",
+                labels=depth_bins,  # assign labels to the bins; must align with bin edges 
+                label_key="ID",
+                strict_labels=True,   # error if any ID in raster lacks a label
             )
 
             print(
@@ -597,8 +618,11 @@ if run_shapefiles:
                 connectivity=8,
                 min_pixels=25,  # drop patches < 25 pixels
                 dissolve=True,  # merge polygons by class ID
+                labels=depth_bins,  # assign labels to the bins; must align with bin edges 
+                label_key="ID",
+                strict_labels=True,   # error if any ID in raster lacks a label
             )
-
+            
             print(
                 f"  {helper.rp_tag(rp)}/qmax_bins: {qbins_shp_fn.name} ({time.time() - t0:.1f}s)"
             )

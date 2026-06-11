@@ -1290,29 +1290,57 @@ def stamp_provenance(fn: Path, **tags) -> None:
 
 def bin_raster(
     in_fn: Path,
-    bin_edges: Sequence[float],
-    labels: Sequence[str],
+    bins_dict: Mapping[str, object],
     out_fn: Path,
 ) -> None:
     """Block-wise hazard-category binning of a float raster -> uint8 GeoTIFF.
 
+    Input is a dictionary with at least:
+      - IDs:       bins_dict["ID"]          (array-like)
+      - Category:  bins_dict["Category"]    (list of str)
+      - Label:     bins_dict["VD_Label"]    (list of str)
+      - Lower edge (meters or relevant units): bins_dict["VD_Min"] (array-like)
+      - Upper edge (meters or relevant units): bins_dict["VD_Max"] (array-like)
+
     Bin convention (np.digitize, right=False):
-      0      below first edge (treated as no-hazard / dry)
-      1..N   bin index for values in [edges[i-1], edges[i]) ; last bin -> +inf
+      0      below first lower edge (treated as no-hazard / dry)
+      1..N   bin index for values in [VD_Min[i], VD_Min[i+1]) ; last bin -> [VD_Min[N-1], +inf)
       255    nodata (non-finite source pixel)
 
-    `labels` (length N) describe bins 1..N and are written as TIFF tags.
+    TIFF tags capture the dictionary attributes at both summary and per-bin levels.
     """
     in_fn = Path(in_fn)
     out_fn = Path(out_fn)
     out_fn.parent.mkdir(parents=True, exist_ok=True)
 
-    edges = np.asarray(bin_edges, dtype=np.float32)
-    if edges.size != len(labels):
+    # --- Extract and validate bins_dict ---
+    required = ("ID", "Category", "VD_Label", "VD_Min", "VD_Max")
+    missing = [k for k in required if k not in bins_dict]
+    if missing:
+        raise ValueError(f"bins_dict missing required keys: {missing}")
+
+    ids    = np.asarray(bins_dict["ID"])
+    cats   = list(bins_dict["Category"])
+    labels = list(bins_dict["VD_Label"])
+    vmin   = np.asarray(bins_dict["VD_Min"], dtype=np.float32)
+    vmax   = np.asarray(bins_dict["VD_Max"], dtype=np.float32)
+
+    n = vmin.size
+    if not (len(ids) == len(cats) == len(labels) == vmin.size == vmax.size):
         raise ValueError(
-            f"bin_edges has {edges.size} entries but labels has {len(labels)}; "
-            "expected one label per edge (lower bound of each bin)."
+            "All bins_dict arrays/lists must have the same length: "
+            f"ID={len(ids)}, Category={len(cats)}, VD_Label={len(labels)}, "
+            f"VD_Min={vmin.size}, VD_Max={vmax.size}"
         )
+
+    # Optional sanity checks (kept minimal)
+    if n > 1 and not np.all(np.diff(vmin) > 0):
+        raise ValueError("bins_dict['VD_Min'] must be strictly increasing.")
+    if not np.all(vmin <= vmax):
+        raise ValueError("Each bin must satisfy VD_Min <= VD_Max.")
+
+    # Use lower bounds as edges for np.digitize
+    edges = vmin
 
     with rasterio.open(in_fn) as src:
         meta = src.meta.copy()
@@ -1328,24 +1356,48 @@ def bin_raster(
         )
         with rasterio.open(out_fn, "w", **meta) as dst:
             for _, window in src.block_windows(1):
-                block = src.read(1, window=window)
-                bins = np.digitize(block, edges, right=False).astype(np.uint8)
+                block = src.read(1, window=window).astype(np.float32)
+
+                bins = np.digitize(block, edges, right=False).astype(np.uint8)  # 0..N
+                # Clamp to N to ensure the "last bin -> +inf" behavior
+                bins = np.minimum(bins, n).astype(np.uint8)
+
+                # Mark non-finite as nodata
                 bins[~np.isfinite(block)] = 255
+
                 dst.write(bins, 1, window=window)
-            dst.update_tags(
-                bin_edges=",".join(f"{e:g}" for e in edges),
-                bin_labels=",".join(labels),
-                nodata_label="nodata",
-                bin_0_label="below_first_edge",
-            )
+
+            # --- Tags reflecting dictionary attributes ---
+            def _fmt(v):
+                return f"{v:g}" if np.isfinite(v) else ("-inf" if v < 0 else "inf")
+
+            tags = {
+                "bin_ids": ",".join(str(int(i)) for i in ids),
+                "bin_category": ",".join(str(s) for s in cats),
+                "bin_label": ",".join(str(s) for s in labels),
+                "bin_min": ",".join(_fmt(float(v)) for v in vmin),
+                "bin_max": ",".join(_fmt(float(v)) for v in vmax),
+                "nodata_label": "nodata",
+                "bin_0_label": "below_first_edge",
+            }
+            # Per-bin details: bin_1..bin_N
+            for i in range(n):
+                idx = i + 1
+                tags[f"bin_{idx}_id"] = str(int(ids[i]))
+                tags[f"bin_{idx}_category"] = str(cats[i])
+                tags[f"bin_{idx}_label"] = str(labels[i])
+                tags[f"bin_{idx}_min"] = _fmt(float(vmin[i]))
+                tags[f"bin_{idx}_max"] = _fmt(float(vmax[i]))
+
+            dst.update_tags(**tags)
+
 
 
 def bin_depth_with_overlays(
     hmax_masked_fn: Path,
     connection_fn: Path,
     dem_fn: Path,
-    bin_edges: Sequence[float],
-    bin_labels: Sequence[str],
+    depth_bins: Mapping[str, object],
     out_fn: Path,
     mhhw_elevation: Optional[float] = None,
     below_mhhw_label: str = "Below MHHW",
@@ -1362,20 +1414,16 @@ def bin_depth_with_overlays(
     ===========  =====================================================
     0            dry / no flooding
     1            Below MHHW (only set when mhhw_elevation is not None
-                 AND dem < mhhw_elevation; takes precedence over all
-                 other categories so tidally-submerged channels are
-                 not labelled as flood hazard)
-    2..N+1       depth bins (N = len(bin_edges); `bin_labels[i]`
-                 corresponds to code i+2, ascending in depth)
-    N+2          Flood-prone Low-Lying (`connection == 2`, i.e.
-                 standing water removed by Step 5 because it was
-                 disconnected from the boundary)
+                 AND dem < mhhw_elevation; takes precedence so tidally-
+                 submerged channels are not labelled as flood hazard)
+    2..N+1       depth bins (N = len(depth_bins["D_Min"]); code i+2
+                 corresponds to bin i in depth_bins arrays)
+    N+2          Flood-prone Low-Lying (`connection == 2`)
     255          nodata (non-finite DEM)
     ===========  =====================================================
 
-    Tags written for downstream legend rendering: `bin_edges`,
-    `bin_labels`, `below_mhhw_code`, `floodprone_code`, plus a label
-    for each code so QGIS / gdalinfo show the mapping.
+    Tags are updated to reflect the dictionary inputs: IDs, Category,
+    Depth_Label_ft, Depth_Label_m, D_Min, D_Max, and per-code details.
     """
     hmax_masked_fn = Path(hmax_masked_fn)
     connection_fn = Path(connection_fn)
@@ -1383,18 +1431,38 @@ def bin_depth_with_overlays(
     out_fn = Path(out_fn)
     out_fn.parent.mkdir(parents=True, exist_ok=True)
 
-    edges = np.asarray(bin_edges, dtype=np.float32)
-    if edges.size != len(bin_labels):
+    # --- Extract and validate depth_bins ---
+    # Required keys: ID, Category, Depth_Label_ft, Depth_Label_m, D_Min, D_Max
+    required = ("ID", "Category", "Depth_Label_ft", "Depth_Label_m", "D_Min", "D_Max")
+    missing = [k for k in required if k not in depth_bins]
+    if missing:
+        raise ValueError(f"depth_bins missing required keys: {missing}")
+
+    ids = np.asarray(depth_bins["ID"])
+    cats = list(depth_bins["Category"])
+    lbl_ft = list(depth_bins["Depth_Label_ft"])
+    lbl_m = list(depth_bins["Depth_Label_m"])
+    dmin = np.asarray(depth_bins["D_Min"], dtype=np.float32)
+    dmax = np.asarray(depth_bins["D_Max"], dtype=np.float32)
+
+    n_depth_bins = dmin.size
+    if not (len(ids) == len(cats) == len(lbl_ft) == len(lbl_m) == dmin.size == dmax.size):
         raise ValueError(
-            f"bin_edges has {edges.size} entries but bin_labels has "
-            f"{len(bin_labels)}; expected one label per bin (lower edge)."
+            "All depth_bins arrays/lists must have the same length: "
+            f"ID={len(ids)}, Category={len(cats)}, Depth_Label_ft={len(lbl_ft)}, "
+            f"Depth_Label_m={len(lbl_m)}, D_Min={dmin.size}, D_Max={dmax.size}"
         )
-    n_depth_bins = edges.size
+
+    # Optional sanity: D_Min strictly increasing; D_Max non-decreasing & D_Min[i] <= D_Max[i]
+    # (kept minimal; comment out if you want to allow plateaus)
+    if n_depth_bins > 1 and not np.all(np.diff(dmin) > 0):
+        raise ValueError("depth_bins['D_Min'] must be strictly increasing.")
+    if not np.all(dmin <= dmax):
+        raise ValueError("Each bin must satisfy D_Min <= D_Max.")
+
     below_mhhw_code = 1
     depth_code_offset = 2  # depth bins -> 2 .. n_depth_bins+1
-    floodprone_code = (
-        n_depth_bins + depth_code_offset
-    )  # next code after the deepest bin
+    floodprone_code = n_depth_bins + depth_code_offset  # next code after deepest bin
 
     if floodprone_code >= 255:
         raise ValueError(
@@ -1402,6 +1470,7 @@ def bin_depth_with_overlays(
             f"would be {floodprone_code} >= 255 (nodata)."
         )
 
+    # Prepare output metadata from the hmax source
     with rasterio.open(hmax_masked_fn) as src:
         meta = src.meta.copy()
     meta.update(
@@ -1442,13 +1511,12 @@ def bin_depth_with_overlays(
             # depth bins for pixels NOT below MHHW and with finite depth > 0
             wet = (~below) & (~dem_nodata) & np.isfinite(h) & (h > 0.0)
             if np.any(wet):
-                bins = np.digitize(h, edges, right=False).astype(np.int16)
+                # Use D_Min as lower edges; clamp to N to avoid collision with floodprone_code.
+                bins = np.digitize(h, dmin, right=False).astype(np.int16)  # 0 .. N+1
                 bins[~wet] = 0
-                # np.digitize returns 0 for values below the smallest edge;
-                # shift wet bins (1..N) into the [2..N+1] depth-code range
-                shifted = np.where(bins >= 1, bins + (depth_code_offset - 1), 0).astype(
-                    np.uint8
-                )
+                bins = np.minimum(bins, n_depth_bins)  # force deepest values into deepest bin (0..N)
+                # Shift wet bins (1..N) into the [2..N+1] depth-code range
+                shifted = np.where(bins >= 1, bins + (depth_code_offset - 1), 0).astype(np.uint8)
                 out[wet] = shifted[wet]
 
             # flood-prone low-lying: connection == 2, but only where NOT
@@ -1460,124 +1528,230 @@ def bin_depth_with_overlays(
 
             dst.write(out, 1, window=window)
 
-        # Tags for downstream legend rendering
+        # --- Tags for downstream legend rendering (dictionary-based) ---
+        def _fmt(v):
+            return f"{v:g}" if np.isfinite(v) else ("-inf" if v < 0 else "inf")
+
         tags = {
-            "bin_edges": ",".join(f"{e:g}" for e in edges),
-            "bin_labels": ",".join(bin_labels),
+            # High-level bin descriptors
+            "bin_ids": ",".join(str(int(i)) for i in ids),
+            "bin_category": ",".join(str(s) for s in cats),
+            "bin_label_ft": ",".join(str(s) for s in lbl_ft),
+            "bin_label_m": ",".join(str(s) for s in lbl_m),
+            "bin_min_m": ",".join(_fmt(v) for v in dmin),
+            "bin_max_m": ",".join(_fmt(v) for v in dmax),
+
+            # Overlay codes
             "code_0_label": "dry",
             "below_mhhw_code": str(below_mhhw_code),
             f"code_{below_mhhw_code}_label": below_mhhw_label,
             "floodprone_code": str(floodprone_code),
             f"code_{floodprone_code}_label": floodprone_label,
+
+            # Nodata labels
             "nodata_label": "nodata",
+            "code_255_label": "nodata",
         }
-        for i, lbl in enumerate(bin_labels):
-            tags[f"code_{i + depth_code_offset}_label"] = lbl
+
+        # Per-code details (retain generic code_*_label for compatibility; use Category)
+        for i in range(n_depth_bins):
+            code = i + depth_code_offset
+            tags[f"code_{code}_label"] = str(cats[i])               # generic label = Category
+            tags[f"code_{code}_category"] = str(cats[i])
+            tags[f"code_{code}_label_ft"] = str(lbl_ft[i])
+            tags[f"code_{code}_label_m"] = str(lbl_m[i])
+            tags[f"code_{code}_id"] = str(int(ids[i]))
+            tags[f"code_{code}_min_m"] = _fmt(float(dmin[i]))
+            tags[f"code_{code}_max_m"] = _fmt(float(dmax[i]))
+
         if mhhw_elevation is not None:
-            tags["mhhw_elevation_m"] = f"{mhhw_elevation:g}"
-        dst.update_tags(**tags)
+            tags["mhhw_elevation_m"] = f"{float(mhhw_elevation):g}"
 
 
 # =============================================================================
 # SECTION 5: Shapefile
 # =============================================================================
 
+from __future__ import annotations
 
-def raster_to_shape_rasterio(raster_file, vector_file):
-
-    with rasterio.open(raster_file) as src:
-        image = src.read(1)
-        transform = src.transform
-        results = shapes(image, transform=transform)
-
-        geoms = []
-        for geom, value in results:
-            geoms.append({"geometry": shape(geom), "properties": {"ID": int(value)}})
-        gdf = gpd.GeoDataFrame.from_features(geoms, crs=src.crs)
-
-    gdf.to_file(vector_file)
+import numpy as np
+import geopandas as gpd
+import pandas as pd
+import rasterio
+from rasterio.features import shapes, sieve
+from shapely.geometry import shape
+from typing import Optional, Mapping, Any
 
 
 def raster_to_polygons(
     raster_file: str,
     vector_file: str,
     connectivity: int = 8,
-    min_pixels: int | None = None,
+    min_pixels: Optional[int] = None,
     dissolve: bool = False,
-    driver: str | None = None,
+    driver: Optional[str] = None,
+    labels: Optional[pd.DataFrame | Mapping[str, Any]] = None,
+    label_key: str = "ID",
+    strict_labels: bool = False,
 ) -> gpd.GeoDataFrame:
     """
-    Polygonize a (typically categorical) raster to a vector dataset.
+    Polygonize a categorical (integer) raster into a vector dataset, with optional
+    attribute labeling from a user-provided table.
 
-    - connectivity: 4 or 8 (queen/rook)
-    - min_pixels: if set, removes patches smaller than this (salt-and-pepper cleanup)
-    - dissolve: merge polygons by 'ID' after polygonization
-    - driver: 'GPKG', 'GeoJSON', 'ESRI Shapefile', etc. If None, inferred from file extension.
+    Parameters
+    ----------
+    raster_file : str
+        Path to input raster. The first band is used. **Must be integer dtype.**
+    vector_file : str
+        Path to output vector file (e.g., .gpkg, .geojson, .shp).
+    connectivity : int, default=8
+        Pixel connectivity: 4 (rook) or 8 (queen).
+    min_pixels : int | None, default=None
+        If set (>0), removes patches smaller than this (salt-and-pepper cleanup).
+    dissolve : bool, default=False
+        If True, dissolve polygons by 'ID' after polygonization.
+    driver : str | None, default=None
+        Fiona/GDAL driver ('GPKG', 'GeoJSON', 'ESRI Shapefile', etc.). If None, inferred
+        from the output file extension.
+    labels : pandas.DataFrame | dict | None, default=None
+        A label table keyed by `label_key` (default 'ID') that is joined to polygons.
+        Example columns: ['ID', 'Category', 'VD_Label', 'VD_Min', 'VD_Max'].
+        If a dict is provided, it is converted to a DataFrame.
+    label_key : str, default='ID'
+        Name of the key column in `labels` used to join to polygon 'ID'.
+    strict_labels : bool, default=False
+        If True, raises if any polygon IDs are missing from the label table.
+
+    Returns
+    -------
+    gpd.GeoDataFrame
+        Polygonized GeoDataFrame with an integer 'ID' column and any joined label fields.
+
+    Notes
+    -----
+    - Input band **must be integer dtype** (e.g., int16, int32). Floats are rejected.
+    - NoData handling:
+        * If nodata is defined (not None), pixels equal to nodata are masked out.
+        * If nodata is None, all values are included.
+    - `sieve` operates on integer arrays; we do not cast — the function will error if
+      the band is not integer.
+    - Label table:
+        * Duplicated keys in `labels[label_key]` are dropped (first occurrence kept).
+        * Infinite values in numeric label columns are converted to NaN/None so drivers
+          like Shapefile/GeoJSON can write them.
+        * For Shapefile ('ESRI Shapefile'), remember 10-char field name limits and
+          stricter type constraints; prefer GeoPackage ('GPKG') for richer schemas.
     """
+    if connectivity not in (4, 8):
+        raise ValueError(f"connectivity must be 4 or 8, got {connectivity}")
+
+    if min_pixels is not None and min_pixels <= 0:
+        raise ValueError(f"min_pixels must be a positive integer, got {min_pixels}")
+
+    # --- Open raster and enforce integer band ---
     with rasterio.open(raster_file) as src:
         band = src.read(1)  # first band
         transform = src.transform
         crs = src.crs
         nodata = src.nodata
 
-        # Build mask to exclude NoData
-        if np.issubdtype(band.dtype, np.floating):
-            mask = ~np.isnan(band) if nodata is None else band != nodata
-        else:
-            mask = (band != nodata) if nodata is not None else None
+        # Enforce integer dtype
+        if not np.issubdtype(band.dtype, np.integer):
+            raise TypeError(
+                f"Input raster band must be integer dtype; got {band.dtype}. "
+                "Please supply a categorical integer raster."
+            )
 
-        # Optional cleanup to remove tiny patches
-        if min_pixels:
-            band = sieve(band, size=min_pixels, connectivity=connectivity)
+        # Build mask to exclude NoData (if defined)
+        if nodata is None:
+            mask = None
+        else:
+            mask = band != nodata
+
+        # Optional cleanup via sieve (works only on integer arrays)
+        if min_pixels is not None:
+            band = sieve(
+                band.astype(np.int32),  # ensure a sensible int type for sieve
+                size=int(min_pixels),
+                connectivity=connectivity,
+                mask=mask,
+            )
 
         # Polygonize
-        results = shapes(
+        geom_val_iter = shapes(
             band, mask=mask, transform=transform, connectivity=connectivity
         )
 
-        # Build features: keep integer class values as 'ID'
         feats = []
-        for geom, value in results:
+        for geom, value in geom_val_iter:
+            # value is integer (numpy scalar); cast to Python int for GeoJSON-friendly types
             if value is None:
                 continue
-            # Try to cast to int for categorical classes; fallback to original
-            try:
-                value_out = int(value)
-            except Exception:
-                value_out = value
-            feats.append({"geometry": shape(geom), "properties": {"ID": value_out}})
+            v = value.item() if hasattr(value, "item") else value
+            feats.append({"geometry": shape(geom), "properties": {"ID": int(v)}})
 
     gdf = gpd.GeoDataFrame.from_features(feats, crs=crs)
 
-    # Fix invalid geometries if any (self-intersections, etc.)
+    # Drop empties & reset index
     if not gdf.empty:
-        gdf = gdf[gdf.geometry.notna()]
-        gdf = gdf.set_geometry(gdf.geometry.buffer(0))
+        gdf = gdf[~gdf.geometry.is_empty].reset_index(drop=True)
 
-        # Split MultiPolygons into single-part polygons
-        gdf = gdf.explode(index_parts=False, ignore_index=True)
-
-    # Optionally merge polygons by shared class
+    # Optional dissolve by ID
     if dissolve and not gdf.empty:
         gdf = gdf.dissolve(by="ID", as_index=False)
 
-    # Choose driver from extension if not provided
-    if driver is None:
-        ext = os.path.splitext(vector_file)[1].lower()
-        driver = {
-            ".gpkg": "GPKG",
-            ".geojson": "GeoJSON",
-            ".json": "GeoJSON",
-            ".shp": "ESRI Shapefile",
-        }.get(ext, None)
+    # --- Optional label join ---
+    if labels is not None and not gdf.empty:
+        if isinstance(labels, Mapping):
+            labels_df = pd.DataFrame(labels)  # convert dict to DataFrame
+        elif isinstance(labels, pd.DataFrame):
+            labels_df = labels.copy()
+        else:
+            raise TypeError("labels must be a pandas.DataFrame or a dict-like mapping.")
 
-    # Write out
-    if driver:
-        gdf.to_file(vector_file, driver=driver)
-    else:
-        gdf.to_file(vector_file)
+        if label_key not in labels_df.columns:
+            raise KeyError(f"labels is missing the key column '{label_key}'.")
+
+        # Deduplicate label keys (keep first occurrence)
+        labels_df = labels_df.drop_duplicates(subset=[label_key], keep="first")
+
+        # Ensure key columns are integer and consistent
+        labels_df[label_key] = pd.to_numeric(labels_df[label_key], downcast="integer")
+        gdf["ID"] = pd.to_numeric(gdf["ID"], downcast="integer")
+
+        # Replace +/-inf with NaN/None to keep writers happy
+        num_cols = labels_df.select_dtypes(include=[np.number]).columns.tolist()
+        if num_cols:
+            labels_df[num_cols] = labels_df[num_cols].replace(
+                [np.inf, -np.inf], np.nan
+            )
+
+        # Perform left join on ID -> label_key
+        gdf = gdf.merge(labels_df, left_on="ID", right_on=label_key, how="left")
+
+        # If label_key != 'ID', you can drop it post-merge if you prefer:
+        if label_key != "ID":
+            # Keep 'ID' as the canonical code; drop the label key column to avoid duplication
+            gdf = gdf.drop(columns=[label_key])
+
+        if strict_labels:
+            missing = gdf[gdf.filter(like="ID").columns[0]].isna().sum()  # defensive
+            # Or stricter: check rows with any NaNs introduced by join
+            missing_ids = gdf.loc[gdf.isna().any(axis=1), "ID"].unique().tolist()
+            if missing_ids:
+                raise ValueError(
+                    f"The label table is missing mappings for IDs: {missing_ids}"
+                )
+
+    # Write to disk
+    if vector_file:
+        if driver is None:
+            gdf.to_file(vector_file)
+        else:
+            gdf.to_file(vector_file, driver=driver)
 
     return gdf
+
 
 
 def export_connectivity_regions(
