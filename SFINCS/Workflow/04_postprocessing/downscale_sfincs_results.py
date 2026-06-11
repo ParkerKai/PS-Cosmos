@@ -93,8 +93,8 @@ domain_stem = f"_{dem_res}m"
 # "annual_max" picks one peak per cell per year (suitable for Weibull / GEV /
 # POT-with-sidecar). "all_maxima" keeps every sub-yearly timemax slice
 # concatenated across years and is POT-only.
-aggregation_mode = "annual_max"  # "annual_max" | "all_maxima"
-eva_method = "weibull"  # "weibull" | "gev" | "pot"
+aggregation_mode = "all_maxima"  # "annual_max" | "all_maxima"
+eva_method = "pot"  # "weibull" | "gev" | "pot"
 return_periods = [1, 2, 5, 10, 20, 50]
 extra_vars = ["qmax"]  # e.g. ["qmax", "tmax", "tmax_zs"]
 
@@ -109,6 +109,11 @@ gev_min_years = 5
 downscale_method = "bilinear"  # "raw" | "constant" | "bilinear"
 dilation = 0.5  # None to disable; only used for bilinear
 hmin = 0.02  # wet threshold [m], used everywhere
+
+# --- smoothing ---
+smoothing = True  # whether to run the smoothing step at all
+smooth_size = 5  # sigma for gaussian filter
+
 
 # --- hazard binning ---
 # Depth bins (lower edges, m). The categorical output also adds:
@@ -138,14 +143,6 @@ NRMAX = 2000
 # Derived paths + sanity
 # =============================================================================
 
-paths = helper.OutputPaths(
-    output_dir=Path("/data/rasters"),
-    shapefile_dir=Path("/data/vectors"),
-    domain_stem="chehalis",
-    provenance_tag="hecras_2026_06",
-)
-
-paths.ensure_dirs()
 
 if aggregation_mode == "annual_max":
     aggregated_fn = Path(os.path.join(output_dir, "aggregated_annual.nc"))
@@ -168,6 +165,16 @@ eva_fn = output_dir / f"eva_RP_{eva_method}.nc"
 # colliding. e.g. "weibull_annual", "gev_annual", "pot_all".
 AGG_TOKEN = {"annual_max": "annual", "all_maxima": "all"}[aggregation_mode]
 provenance_tag = f"{eva_method}_{AGG_TOKEN}"
+
+
+paths = helper.OutputPaths(
+    output_dir=output_dir,
+    shapefile_dir=shapefile_dir,
+    domain_stem=domain_stem,
+    provenance_tag=provenance_tag,
+)
+
+paths.ensure_dirs()
 
 
 # =============================================================================
@@ -413,6 +420,7 @@ if run_extras and extra_vars:
                 depth_mask_fn=depth_for_mask,
                 hmin=hmin,
             )
+
             helper.stamp_provenance(
                 out_fn,
                 **base_tags,
@@ -420,6 +428,19 @@ if run_extras and extra_vars:
                 variable=v,
                 source="quadtree_nearest_via_index_cog",
             )
+
+            if smoothing:
+                print(f"  {helper.rp_tag(rp)}/{v}: smoothing {out_fn.name} with smoothing size of {smooth_size}")
+
+                helper.smooth_raster_gaussian_blockwise(
+                    in_fn=out_fn,
+                    out_fn=out_fn,
+                    smooth_size=smooth_size,
+                    truncate=2,
+                )
+
+
+
             print(f"  {helper.rp_tag(rp)}/{v}: wrote {out_fn.name} ({time.time() - t0:.1f}s)")
 else:
     print("  skipped by toggle / no extras configured")
