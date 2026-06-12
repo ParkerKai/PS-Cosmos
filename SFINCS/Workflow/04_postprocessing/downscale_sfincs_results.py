@@ -23,8 +23,6 @@ Run in the hydromt-sfincs-dev environment:
 
 """
 
-from __future__ import annotations
-
 import sys
 import time
 from pathlib import Path
@@ -94,8 +92,8 @@ domain_stem = f"_{dem_res}m"
 # "annual_max" picks one peak per cell per year (suitable for Weibull / GEV /
 # POT-with-sidecar). "all_maxima" keeps every sub-yearly timemax slice
 # concatenated across years and is POT-only.
-aggregation_mode = "all_maxima"  # "annual_max" | "all_maxima"
-eva_method = "pot"  # "weibull" | "gev" | "pot"
+aggregation_mode = "annual_max"  # "annual_max" | "all_maxima"
+eva_method = "weibull"  # "weibull" | "gev" | "pot"
 return_periods = [1, 2, 5, 10, 20, 50]
 extra_vars = ["qmax"]  # e.g. ["qmax", "tmax", "tmax_zs"]
 

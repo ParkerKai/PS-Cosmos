@@ -19,10 +19,8 @@ Sections 0a-0e inline utilities formerly kept in `POT_Extremes.py` and
 `Xarray_NCtools.py` so the whole PS-CoSMoS-specific stack is one import.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
-from typing import List, Literal, Optional, Sequence, Tuple
+from typing import List, Literal, Optional, Sequence, Tuple, Mapping, Any
 import os
 from dataclasses import dataclass
 import tempfile
@@ -38,7 +36,6 @@ import geopandas as gpd
 from shapely.geometry import shape
 from rasterio.features import shapes, sieve
 from rasterio.windows import Window
-
 
 
 # =============================================================================
@@ -1107,6 +1104,7 @@ def map_quadtree_to_dem_nearest(
             if dep_src is not None:
                 dep_src.close()
 
+
 def smooth_raster_gaussian_blockwise(
     in_fn: Path,
     out_fn: Path,
@@ -1130,36 +1128,36 @@ def smooth_raster_gaussian_blockwise(
     ----------
     in_fn : Path
         Path to the input raster file. Must be readable by rasterio and contain
-        a single-band floating‑point dataset (e.g., float32).  
+        a single-band floating‑point dataset (e.g., float32).
         If `in_fn` and `out_fn` refer to the same resolved path, the function
         performs **safe in‑place smoothing** by writing results to a temporary
         file and then atomically replacing the original.
 
     out_fn : Path
-        Output raster file path.  
-        If different from `in_fn`, the smoothed raster is written directly here.  
+        Output raster file path.
+        If different from `in_fn`, the smoothed raster is written directly here.
         If equal to `in_fn`, a temporary raster is created and then moved over
         the original file to guarantee correctness and avoid partial overwrites.
 
     smooth_size : float
         Standard deviation (sigma) of the Gaussian kernel passed to
-        `scipy.ndimage.gaussian_filter`.  
+        `scipy.ndimage.gaussian_filter`.
         Larger values produce stronger, more spatially extensive smoothing.
 
     truncate : float, optional
-        Gaussian kernel truncation radius, expressed in multiples of `sigma`.  
+        Gaussian kernel truncation radius, expressed in multiples of `sigma`.
         The kernel is effectively limited to:
-            radius = truncate * smooth_size  
+            radius = truncate * smooth_size
         Default is `2 * smooth_size` (a common cutoff balancing accuracy and
-        performance).  
+        performance).
         This value determines the **halo size** required around each block.
 
     Notes
     -----
-    • Halo size is computed as:  
+    • Halo size is computed as:
          halo = int(truncate * smooth_size)
 
-    • The function uses rasterio's native block windows for streaming I/O.  
+    • The function uses rasterio's native block windows for streaming I/O.
       Each block is read with extra pixels on all sides (the halo), smoothed,
       and cropped back before writing.
 
@@ -1204,9 +1202,7 @@ def smooth_raster_gaussian_blockwise(
         )
 
         with rasterio.open(actual_out, "w", **meta) as dst:
-
             for _, win in src.block_windows(1):
-
                 # Build padded window
                 row_off = max(win.row_off - halo, 0)
                 col_off = max(win.col_off - halo, 0)
@@ -1254,7 +1250,7 @@ def smooth_raster_gaussian_blockwise(
                 smoothing_sigma=str(smooth_size),
                 smoothing_truncate=str(truncate),
                 smoothing_halo=str(halo),
-                smoothing_note="Blockwise NaN-preserving Gaussian smoothing with halo"
+                smoothing_note="Blockwise NaN-preserving Gaussian smoothing with halo",
             )
 
     # Finalize in-place operation
@@ -1319,11 +1315,11 @@ def bin_raster(
     if missing:
         raise ValueError(f"bins_dict missing required keys: {missing}")
 
-    ids    = np.asarray(bins_dict["ID"])
-    cats   = list(bins_dict["Category"])
+    ids = np.asarray(bins_dict["ID"])
+    cats = list(bins_dict["Category"])
     labels = list(bins_dict["VD_Label"])
-    vmin   = np.asarray(bins_dict["VD_Min"], dtype=np.float32)
-    vmax   = np.asarray(bins_dict["VD_Max"], dtype=np.float32)
+    vmin = np.asarray(bins_dict["VD_Min"], dtype=np.float32)
+    vmax = np.asarray(bins_dict["VD_Max"], dtype=np.float32)
 
     n = vmin.size
     if not (len(ids) == len(cats) == len(labels) == vmin.size == vmax.size):
@@ -1392,7 +1388,6 @@ def bin_raster(
             dst.update_tags(**tags)
 
 
-
 def bin_depth_with_overlays(
     hmax_masked_fn: Path,
     connection_fn: Path,
@@ -1446,7 +1441,9 @@ def bin_depth_with_overlays(
     dmax = np.asarray(depth_bins["D_Max"], dtype=np.float32)
 
     n_depth_bins = dmin.size
-    if not (len(ids) == len(cats) == len(lbl_ft) == len(lbl_m) == dmin.size == dmax.size):
+    if not (
+        len(ids) == len(cats) == len(lbl_ft) == len(lbl_m) == dmin.size == dmax.size
+    ):
         raise ValueError(
             "All depth_bins arrays/lists must have the same length: "
             f"ID={len(ids)}, Category={len(cats)}, Depth_Label_ft={len(lbl_ft)}, "
@@ -1514,9 +1511,13 @@ def bin_depth_with_overlays(
                 # Use D_Min as lower edges; clamp to N to avoid collision with floodprone_code.
                 bins = np.digitize(h, dmin, right=False).astype(np.int16)  # 0 .. N+1
                 bins[~wet] = 0
-                bins = np.minimum(bins, n_depth_bins)  # force deepest values into deepest bin (0..N)
+                bins = np.minimum(
+                    bins, n_depth_bins
+                )  # force deepest values into deepest bin (0..N)
                 # Shift wet bins (1..N) into the [2..N+1] depth-code range
-                shifted = np.where(bins >= 1, bins + (depth_code_offset - 1), 0).astype(np.uint8)
+                shifted = np.where(bins >= 1, bins + (depth_code_offset - 1), 0).astype(
+                    np.uint8
+                )
                 out[wet] = shifted[wet]
 
             # flood-prone low-lying: connection == 2, but only where NOT
@@ -1540,14 +1541,12 @@ def bin_depth_with_overlays(
             "bin_label_m": ",".join(str(s) for s in lbl_m),
             "bin_min_m": ",".join(_fmt(v) for v in dmin),
             "bin_max_m": ",".join(_fmt(v) for v in dmax),
-
             # Overlay codes
             "code_0_label": "dry",
             "below_mhhw_code": str(below_mhhw_code),
             f"code_{below_mhhw_code}_label": below_mhhw_label,
             "floodprone_code": str(floodprone_code),
             f"code_{floodprone_code}_label": floodprone_label,
-
             # Nodata labels
             "nodata_label": "nodata",
             "code_255_label": "nodata",
@@ -1556,7 +1555,7 @@ def bin_depth_with_overlays(
         # Per-code details (retain generic code_*_label for compatibility; use Category)
         for i in range(n_depth_bins):
             code = i + depth_code_offset
-            tags[f"code_{code}_label"] = str(cats[i])               # generic label = Category
+            tags[f"code_{code}_label"] = str(cats[i])  # generic label = Category
             tags[f"code_{code}_category"] = str(cats[i])
             tags[f"code_{code}_label_ft"] = str(lbl_ft[i])
             tags[f"code_{code}_label_m"] = str(lbl_m[i])
@@ -1571,16 +1570,6 @@ def bin_depth_with_overlays(
 # =============================================================================
 # SECTION 5: Shapefile
 # =============================================================================
-
-from __future__ import annotations
-
-import numpy as np
-import geopandas as gpd
-import pandas as pd
-import rasterio
-from rasterio.features import shapes, sieve
-from shapely.geometry import shape
-from typing import Optional, Mapping, Any
 
 
 def raster_to_polygons(
@@ -1722,9 +1711,7 @@ def raster_to_polygons(
         # Replace +/-inf with NaN/None to keep writers happy
         num_cols = labels_df.select_dtypes(include=[np.number]).columns.tolist()
         if num_cols:
-            labels_df[num_cols] = labels_df[num_cols].replace(
-                [np.inf, -np.inf], np.nan
-            )
+            labels_df[num_cols] = labels_df[num_cols].replace([np.inf, -np.inf], np.nan)
 
         # Perform left join on ID -> label_key
         gdf = gdf.merge(labels_df, left_on="ID", right_on=label_key, how="left")
@@ -1751,7 +1738,6 @@ def raster_to_polygons(
             gdf.to_file(vector_file, driver=driver)
 
     return gdf
-
 
 
 def export_connectivity_regions(
