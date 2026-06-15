@@ -111,7 +111,7 @@ hmin = 0.02  # wet threshold [m], used everywhere
 
 # --- smoothing ---
 smoothing = True  # whether to run the smoothing step at all
-smooth_size = 5  # sigma for gaussian filter
+smooth_size = 6  # sigma for gaussian filter
 
 
 # --- hazard binning ---
@@ -329,8 +329,8 @@ if run_downscale:
         "the aggregated NetCDF was likely built from a different quadtree."
     )
     for rp in return_periods:
-        h_fn = paths.hmax_path(rp)
-        z_fn = paths.zsmax_path(rp)
+        h_fn = paths.hmax(rp)
+        z_fn = paths.zsmax(rp)
         if h_fn.exists() and z_fn.exists():
             print(f"  skip {helper.rp_tag(rp)}: outputs exist")
             continue
@@ -371,11 +371,11 @@ else:
 print(f"\n{'=' * 60}\nStep 5: disconnected-flooding removal\n{'=' * 60}")
 if run_disconnect:
     for rp in return_periods:
-        h_fn = paths.hmax_path(rp)
-        z_fn = paths.zsmax_path(rp)
-        h_m = paths.hmax_masked_path(rp)
-        z_m = paths.zsmax_masked_path(rp)
-        c_fn = paths.connection_path(rp)
+        h_fn = paths.hmax(rp)
+        z_fn = paths.zsmax(rp)
+        h_m = paths.hmax_masked(rp)
+        z_m = paths.zsmax_masked(rp)
+        c_fn = paths.connection(rp)
         if not h_fn.exists():
             print(f"  skip {helper.rp_tag(rp)}: hmax not found")
             continue
@@ -400,7 +400,9 @@ if run_disconnect:
         helper.stamp_provenance(
             c_fn, **base_tags, **step5_tags, variable="connection_mask"
         )
-        print(f"  {helper.rp_tag(rp)}: connection + masked rasters ({time.time() - t0:.1f}s)")
+        print(
+            f"  {helper.rp_tag(rp)}: connection + masked rasters ({time.time() - t0:.1f}s)"
+        )
 else:
     print("  skipped by toggle")
 
@@ -412,15 +414,13 @@ print(f"\n{'=' * 60}\nStep 6: extras nearest-neighbour mapping\n{'=' * 60}")
 if run_extras and extra_vars:
     for rp in return_periods:
         depth_for_mask = (
-            paths.hmax_masked_path(rp)
-            if paths.hmax_masked_path(rp).exists()
-            else paths.hmax_path(rp)
+            paths.hmax_masked(rp) if paths.hmax_masked(rp).exists() else paths.hmax(rp)
         )
         if not depth_for_mask.exists():
             print(f"  skip {helper.rp_tag(rp)}: no hmax raster")
             continue
         for v in extra_vars:
-            out_fn = paths.extra_path(v, rp)
+            out_fn = paths.extra(v, rp)
             if out_fn.exists():
                 print(f"  skip {helper.rp_tag(rp)}/{v}: exists")
                 continue
@@ -446,18 +446,23 @@ if run_extras and extra_vars:
             )
 
             if smoothing:
-                print(f"  {helper.rp_tag(rp)}/{v}: smoothing {out_fn.name} with smoothing size of {smooth_size}")
+                in_fn = paths.extra(v, rp)
+                out_fn = paths.extra_smooth(v, rp)
 
-                helper.smooth_raster_gaussian_blockwise(
-                    in_fn=out_fn,
-                    out_fn=out_fn,
-                    smooth_size=smooth_size,
-                    truncate=2,
+                print(
+                    f"  {helper.rp_tag(rp)}/{v}: smoothing {out_fn.name} with smoothing size of {smooth_size}"
                 )
 
+                helper.smooth_raster_gaussian_blockwise(
+                    in_fn=in_fn,
+                    out_fn=out_fn,
+                    smooth_size=smooth_size,
+                    truncate=4,
+                )
 
-
-            print(f"  {helper.rp_tag(rp)}/{v}: wrote {out_fn.name} ({time.time() - t0:.1f}s)")
+            print(
+                f"  {helper.rp_tag(rp)}/{v}: wrote {out_fn.name} ({time.time() - t0:.1f}s)"
+            )
 else:
     print("  skipped by toggle / no extras configured")
 
@@ -469,17 +474,15 @@ print(f"\n{'=' * 60}\nStep 7: hazard binning (depth + qmax)\n{'=' * 60}")
 if run_binning:
     for rp in return_periods:
         h_for_bin = (
-            paths.hmax_masked_path(rp)
-            if paths.hmax_masked_path(rp).exists()
-            else paths.hmax_path(rp)
+            paths.hmax_masked(rp) if paths.hmax_masked(rp).exists() else paths.hmax(rp)
         )
         if not h_for_bin.exists():
             print(f"  skip {helper.rp_tag(rp)}: no hmax raster")
             continue
 
         # depth bins (composite: Below MHHW + 4 depth bins + Flood-prone Low-Lying)
-        d_bins_fn = paths.depth_bins_path(rp)
-        c_fn = paths.connection_path(rp)
+        d_bins_fn = paths.depth_bins(rp)
+        c_fn = paths.connection(rp)
         if d_bins_fn.exists():
             print(f"  skip {helper.rp_tag(rp)}/depth_bins: exists")
         elif not c_fn.exists():
@@ -510,11 +513,15 @@ if run_binning:
             )
 
         # qmax bins (depth-velocity product, m^2/s) - bin the raster from Step 6
-        q_fn = paths.extra_path("qmax", rp)
+        if smoothing:
+            q_fn = paths.extra_smooth("qmax", rp)
+        else:
+            q_fn = paths.extra("qmax", rp)
+
         if not q_fn.exists():
             print(f"  skip {helper.rp_tag(rp)}/qmax_bins: qmax raster not available")
             continue
-        q_bins_fn = paths.qmax_bins_path(rp)
+        q_bins_fn = paths.qmax_bins(rp)
         if q_bins_fn.exists():
             print(f"  skip {helper.rp_tag(rp)}/qmax_bins: exists")
         else:
@@ -543,18 +550,22 @@ print(f"\n{'=' * 60}\nStep 8: shapefile conversion\n{'=' * 60}")
 if run_shapefiles:
     for rp in return_periods:
         ############ extent (Connected and Disconnected) ###########
-        extentConn_shp_fn = paths.extent_connected_shapefile_path(rp)
-        extentDisConn_shp_fn = paths.extent_disconnected_shapefile_path(rp)
+        extentConn_shp_fn = paths.extent_connected_shapefile(rp)
+        extentDisConn_shp_fn = paths.extent_disconnected_shapefile(rp)
 
-        c_fn = paths.connection_path(rp)
+        c_fn = paths.connection(rp)
         if extentConn_shp_fn.exists():
-            print(f"  skip {helper.rp_tag(rp)}/extent shapefiles: Connected shapefile exists")
+            print(
+                f"  skip {helper.rp_tag(rp)}/extent shapefiles: Connected shapefile exists"
+            )
         elif extentDisConn_shp_fn.exists():
             print(
                 f"  skip {helper.rp_tag(rp)}/extent shapefiles: Disconnected shapefile exists"
             )
         elif not c_fn.exists():
-            print(f"  skip {helper.rp_tag(rp)}/extent shapefiles: connection raster not found")
+            print(
+                f"  skip {helper.rp_tag(rp)}/extent shapefiles: connection raster not found"
+            )
         else:
             t0 = time.time()
             connected_gdf, disconnected_gdf = helper.export_connectivity_regions(
@@ -576,8 +587,8 @@ if run_shapefiles:
         ############ extent (Maximum) ###########
 
         ############ depth bins ###########
-        dbins_shp_fn = paths.depth_shapefile_path(rp)
-        d_bins_fn = paths.depth_bins_path(rp)
+        dbins_shp_fn = paths.depth_shapefile(rp)
+        d_bins_fn = paths.depth_bins(rp)
         if d_bins_fn.exists():
             print(f"  skip {helper.rp_tag(rp)}/depth_bins: exists")
         elif not d_bins_fn.exists():
@@ -588,12 +599,12 @@ if run_shapefiles:
                 raster_file=d_bins_fn,
                 vector_file=dbins_shp_fn,
                 connectivity=8,
-                min_pixels=25,              # drop patches < 25 pixels
-                dissolve=True,           # merge polygons by class ID     
+                min_pixels=25,  # drop patches < 25 pixels
+                dissolve=True,  # merge polygons by class ID
                 driver="ESRI Shapefile",
-                labels=depth_bins,  # assign labels to the bins; must align with bin edges 
+                labels=depth_bins,  # assign labels to the bins; must align with bin edges
                 label_key="ID",
-                strict_labels=True,   # error if any ID in raster lacks a label
+                strict_labels=True,  # error if any ID in raster lacks a label
             )
 
             print(
@@ -601,10 +612,12 @@ if run_shapefiles:
             )
 
         ############ qmax  bins  (depth-velocity product, m^2/s) ###########
-        qbins_shp_fn = paths.qmax_shapefile_path(rp)
-        q_bins_fn = paths.qmax_bins_path(rp)
+        qbins_shp_fn = paths.qmax_shapefile(rp)
+        q_bins_fn = paths.qmax_bins(rp)
         if not q_bins_fn.exists():
-            print(f"  skip {helper.rp_tag(rp)}/qmax_bins: qmax binned raster not available")
+            print(
+                f"  skip {helper.rp_tag(rp)}/qmax_bins: qmax binned raster not available"
+            )
             continue
         if qbins_shp_fn.exists():
             print(f"  skip {helper.rp_tag(rp)}/qmax_bins: exists")
@@ -616,11 +629,11 @@ if run_shapefiles:
                 connectivity=8,
                 min_pixels=25,  # drop patches < 25 pixels
                 dissolve=True,  # merge polygons by class ID
-                labels=depth_bins,  # assign labels to the bins; must align with bin edges 
+                labels=depth_bins,  # assign labels to the bins; must align with bin edges
                 label_key="ID",
-                strict_labels=True,   # error if any ID in raster lacks a label
+                strict_labels=True,  # error if any ID in raster lacks a label
             )
-            
+
             print(
                 f"  {helper.rp_tag(rp)}/qmax_bins: {qbins_shp_fn.name} ({time.time() - t0:.1f}s)"
             )

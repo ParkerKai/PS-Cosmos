@@ -29,6 +29,7 @@ import shutil
 import numpy as np
 import pandas as pd
 import rasterio
+import math
 import xarray as xr
 from scipy.stats import genextreme
 from scipy.ndimage import gaussian_filter
@@ -125,6 +126,12 @@ class OutputPaths:
             self.output_dir
             / f"{name}_{rp_tag(rp)}_{self.domain_stem}_{self.provenance_tag}{self.raster_ext}"
         )
+    
+    def raster_smooth(self, name: str, rp: float) -> Path:
+        return (
+            self.output_dir
+            / f"{name}_smooth_{rp_tag(rp)}_{self.domain_stem}_{self.provenance_tag}{self.raster_ext}"
+        )
 
     def vector(self, name: str, rp: float) -> Path:
         return (
@@ -138,48 +145,53 @@ class OutputPaths:
         return p.parent / f"{p.stem}_masked{p.suffix}"
 
     # --- Specific raster helpers (mirroring your original names) ---
-    def hmax_path(self, rp: float) -> Path:
+    def hmax(self, rp: float) -> Path:
         return self.raster("hmax", rp)
 
-    def zsmax_path(self, rp: float) -> Path:
+    def zsmax(self, rp: float) -> Path:
         return self.raster("zsmax", rp)
 
-    def hmax_masked_path(self, rp: float) -> Path:
-        return self.masked(self.hmax_path(rp))
+    def hmax_masked(self, rp: float) -> Path:
+        return self.masked(self.hmax(rp))
 
-    def zsmax_masked_path(self, rp: float) -> Path:
-        return self.masked(self.zsmax_path(rp))
+    def zsmax_masked(self, rp: float) -> Path:
+        return self.masked(self.zsmax(rp))
 
-    def connection_path(self, rp: float) -> Path:
+    def connection(self, rp: float) -> Path:
         return self.raster("connection", rp)
 
-    def extra_path(self, var: str, rp: float) -> Path:
+    def extra(self, var: str, rp: float) -> Path:
         return self.raster(var, rp)
+    
+    def extra_smooth(self, var: str, rp: float) -> Path:
+        return self.raster_smooth(var, rp)
 
-    def depth_bins_path(self, rp: float) -> Path:
+    def depth_bins(self, rp: float) -> Path:
         return self.raster("depth_bins", rp)
 
-    def qmax_bins_path(self, rp: float) -> Path:
+    def qmax_bins(self, rp: float) -> Path:
         return self.raster("qmax_bins", rp)
 
     # --- Vector (shapefile) helpers ---
-    def depth_shapefile_path(self, rp: float) -> Path:
+    def depth_shapefile(self, rp: float) -> Path:
         return self.vector("depth_bins", rp)
 
-    def qmax_shapefile_path(self, rp: float) -> Path:
+    def qmax_shapefile(self, rp: float) -> Path:
         return self.vector("qmax_bins", rp)
 
-    def extent_connected_shapefile_path(self, rp: float) -> Path:
+    def extent_connected_shapefile(self, rp: float) -> Path:
         return self.vector("extent_connected", rp)
 
-    def extent_disconnected_shapefile_path(self, rp: float) -> Path:
+    def extent_disconnected_shapefile(self, rp: float) -> Path:
         return self.vector("extent_disconnected", rp)
 
-    def extent_min_shapefile_path(self, rp: float) -> Path:
+    def extent_min_shapefile(self, rp: float) -> Path:
         return self.vector("extent_min", rp)
 
-    def extent_max_shapefile_path(self, rp: float) -> Path:
+    def extent_max_shapefile(self, rp: float) -> Path:
         return self.vector("extent_max", rp)
+
+
 
     # --- Utilities ---
     def ensure_dirs(self) -> None:
@@ -1104,106 +1116,167 @@ def map_quadtree_to_dem_nearest(
             if dep_src is not None:
                 dep_src.close()
 
+from pathlib import Path
+from typing import Optional
+import math
+
+import numpy as np
+import rasterio
+from rasterio.windows import Window
+from scipy.ndimage import gaussian_filter
+
 
 def smooth_raster_gaussian_blockwise(
     in_fn: Path,
     out_fn: Path,
     smooth_size: float,
-    truncate: float = None,
+    truncate: Optional[float] = None,
+    *,
+    preserve_input_nodata: bool = False,
+    out_dtype: str = "float32",
+    out_blocksize: Optional[int] = None,  # e.g., 256 or 512; if None, derive from source or fallback
+    mode: str = "reflect",  # scipy.ndimage gaussian_filter boundary mode
 ) -> None:
     """
-    Blockwise NaN‑preserving Gaussian smoothing with halo padding.
+    Blockwise NaN/nodata‑preserving Gaussian smoothing with halo padding.
 
-    This function applies Gaussian smoothing to a raster using a blockwise
-    (tiled) streaming approach. Unlike whole‑array convolution, which requires
-    loading the entire raster into memory, this method expands each block read
-    by adding a surrounding padded “halo” region. The halo ensures that the
-    Gaussian filter has the necessary neighborhood context to avoid seam
-    artifacts at tile boundaries.
-
-    The smoothing is NaN‑aware: NaNs in the input raster are excluded from
-    influencing neighboring pixels, and NaNs are preserved in the result.
+    The filter is applied in a streaming, tiled fashion. Each output tile is read
+    with a surrounding halo from the input to avoid seam artifacts. Invalid values
+    (NaN and source nodata) are excluded via weighted convolution (V/W).
 
     Parameters
     ----------
     in_fn : Path
-        Path to the input raster file. Must be readable by rasterio and contain
-        a single-band floating‑point dataset (e.g., float32).
-        If `in_fn` and `out_fn` refer to the same resolved path, the function
-        performs **safe in‑place smoothing** by writing results to a temporary
-        file and then atomically replacing the original.
-
+        Path to readable raster (single band float ideally).
     out_fn : Path
-        Output raster file path.
-        If different from `in_fn`, the smoothed raster is written directly here.
-        If equal to `in_fn`, a temporary raster is created and then moved over
-        the original file to guarantee correctness and avoid partial overwrites.
-
+        Path to write the smoothed raster (must be different from in_fn).
     smooth_size : float
-        Standard deviation (sigma) of the Gaussian kernel passed to
-        `scipy.ndimage.gaussian_filter`.
-        Larger values produce stronger, more spatially extensive smoothing.
-
+        Gaussian sigma (pixels).
     truncate : float, optional
-        Gaussian kernel truncation radius, expressed in multiples of `sigma`.
-        The kernel is effectively limited to:
-            radius = truncate * smooth_size
-        Default is `2 * smooth_size` (a common cutoff balancing accuracy and
-        performance).
-        This value determines the **halo size** required around each block.
+        Radius multiplier for the Gaussian kernel. The effective radius is:
+        radius = truncate * smooth_size. If None, uses 2.0 (common). SciPy's
+        default is 4.0.
+    preserve_input_nodata : bool, default False
+        If True, output nodata metadata matches the source nodata (if any).
+        If False, output nodata metadata is omitted (None) and actual NaNs in
+        data represent missing values.
+    out_dtype : str, default "float32"
+        Output dtype.
+    out_blocksize : int, optional
+        Output tile size (square). If None, derive from source tiling; else use
+        provided (typical: 256 or 512).
+    mode : {"reflect","nearest","mirror","constant","wrap"}, default "reflect"
+        Boundary handling for gaussian_filter.
 
     Notes
     -----
-    • Halo size is computed as:
-         halo = int(truncate * smooth_size)
+    • Halo size = ceil(truncate * sigma)
+    • Weighted smoothing ignores NaNs and nodata:
+        V = data with invalid set to 0
+        W = 1 for valid, 0 for invalid
+        out = gaussian(V) / gaussian(W), for W > eps
+    • Output is tiled GeoTIFF with DEFLATE compression and floating predictor.
 
-    • The function uses rasterio's native block windows for streaming I/O.
-      Each block is read with extra pixels on all sides (the halo), smoothed,
-      and cropped back before writing.
-
-    • Output is written as float32 with NaN nodata.
-
-    • Raster tags are updated to document smoothing parameters.
+    Raises
+    ------
+    ValueError
+        If smooth_size < 0, or if out_fn == in_fn (in‑place writing removed).
     """
-
     in_fn = Path(in_fn)
     out_fn = Path(out_fn)
 
-    # Determine if user wants in-place smoothing
-    in_place = in_fn.resolve() == out_fn.resolve()
+    if in_fn.resolve() == out_fn.resolve():
+        raise ValueError("out_fn must be different from in_fn; in‑place writing has been removed.")
 
-    # If in-place: create a temporary output file
-    if in_place:
-        temp_dir = tempfile.TemporaryDirectory()
-        tmp_out = Path(temp_dir.name) / "smoothed.tif"
-        actual_out = tmp_out
-    else:
-        out_fn.parent.mkdir(parents=True, exist_ok=True)
-        actual_out = out_fn
-
+    if smooth_size < 0:
+        raise ValueError("smooth_size (sigma) must be >= 0")
     if truncate is None:
-        truncate = 2 * smooth_size
+        truncate = 2.0  # common choice; SciPy default is 4.0
 
-    halo = int(truncate * smooth_size)
+    out_np_dtype = np.dtype(out_dtype)
+
+    # Short‑circuit: sigma==0 → copy (with nodata update policy, but no in‑place)
+    if smooth_size == 0:
+        out_fn.parent.mkdir(parents=True, exist_ok=True)
+        with rasterio.open(in_fn) as src:
+            if src.count != 1:
+                raise ValueError(f"Expected a single-band raster; found {src.count} bands.")
+            meta = src.meta.copy()
+
+            # Decide nodata metadata policy
+            src_nodata = src.nodata
+            out_nodata_tag = src_nodata if preserve_input_nodata else None
+
+            meta.update(dtype=out_dtype, nodata=out_nodata_tag)
+
+            band = src.read(1).astype(out_np_dtype, copy=False)
+
+            # If not preserving nodata and source had a finite nodata, convert those cells to NaN
+            if (not preserve_input_nodata and
+                src_nodata is not None and not (isinstance(src_nodata, float) and np.isnan(src_nodata))):
+                band = band.copy()
+                band[band == src_nodata] = np.nan
+
+            with rasterio.open(out_fn, "w", **meta) as dst:
+                dst.write(band, 1)
+                dst.update_tags(
+                    smoothing="gaussian_blockwise",
+                    smoothing_sigma=str(smooth_size),
+                    smoothing_truncate=str(truncate),
+                    smoothing_halo=str(0),
+                    input_nodata=str(src_nodata),
+                    output_nodata=("None" if out_nodata_tag is None else str(out_nodata_tag)),
+                    note="sigma=0 → copy",
+                    mode=mode,
+                )
+        return
+
+    # Regular smoothing path
+    halo = max(1, int(math.ceil(truncate * smooth_size)))
+    out_fn.parent.mkdir(parents=True, exist_ok=True)
 
     with rasterio.open(in_fn) as src:
-        meta = src.meta.copy()
-        height, width = src.height, src.width
+        if src.count != 1:
+            raise ValueError(f"Expected a single-band raster; found {src.count} bands.")
 
-        meta.update(
-            dtype="float32",
-            nodata=np.nan,
+        height, width = src.height, src.width
+        src_profile = src.profile.copy()
+        src_nodata = src.nodata
+
+        # Choose output block size
+        if out_blocksize is not None:
+            block_h = block_w = int(out_blocksize)
+        else:
+            # Try to inherit source tiling; fall back to profile; else 512
+            try:
+                block_h, block_w = src.block_shapes[0]  # (height, width)
+            except Exception:
+                block_w = int(src_profile.get("blockxsize", 512))
+                block_h = int(src_profile.get("blockysize", 512))
+
+        # Decide output nodata metadata tag (omit when using NaNs)
+        out_nodata_tag = src_nodata if preserve_input_nodata else None
+
+        # Build output profile
+        dst_profile = src_profile.copy()
+        dst_profile.update(
+            driver="GTiff",
+            dtype=out_dtype,
             count=1,
+            nodata=out_nodata_tag,
             tiled=True,
-            blockxsize=256,
-            blockysize=256,
+            blockxsize=block_w,
+            blockysize=block_h,
             compress="deflate",
-            BIGTIFF="YES",
+            predictor=3,  # better for float data
+            zlevel=6,     # reasonable compression level
+            BIGTIFF="IF_NEEDED",
         )
 
-        with rasterio.open(actual_out, "w", **meta) as dst:
-            for _, win in src.block_windows(1):
-                # Build padded window
+        with rasterio.open(out_fn, "w", **dst_profile) as dst:
+            # Iterate over the output's block windows for aligned writes
+            for _, win in dst.block_windows(1):
+                # Pad window coordinates in source space
                 row_off = max(win.row_off - halo, 0)
                 col_off = max(win.col_off - halo, 0)
                 row_end = min(win.row_off + win.height + halo, height)
@@ -1216,51 +1289,67 @@ def smooth_raster_gaussian_blockwise(
                     height=row_end - row_off,
                 )
 
-                pad_block = src.read(1, window=pad_win).astype("float32")
+                pad_block = src.read(1, window=pad_win).astype(out_np_dtype, copy=False)
 
-                # NaN-handling logic
-                ind_nan = np.isnan(pad_block)
+                # Build invalid mask (NaN or source nodata)
+                if src_nodata is not None and not (isinstance(src_nodata, float) and np.isnan(src_nodata)):
+                    ind_nan = np.isnan(pad_block) | (pad_block == src_nodata)
+                else:
+                    ind_nan = np.isnan(pad_block)
+
+                # Weighted convolution: ignore invalids
                 V = pad_block.copy()
                 V[ind_nan] = 0.0
 
-                W = np.ones_like(V, dtype="float32")
+                W = np.ones_like(V, dtype=out_np_dtype)
                 W[ind_nan] = 0.0
 
-                VV = gaussian_filter(V, sigma=smooth_size, truncate=truncate)
-                WW = gaussian_filter(W, sigma=smooth_size, truncate=truncate)
+                VV = gaussian_filter(V, sigma=smooth_size, truncate=truncate, mode=mode)
+                WW = gaussian_filter(W, sigma=smooth_size, truncate=truncate, mode=mode)
 
-                out_pad = np.full_like(VV, np.nan, dtype="float32")
-                mask = WW > 1e-10
-                out_pad[mask] = VV[mask] / WW[mask]
-                out_pad[ind_nan] = np.nan
+                out_pad = np.empty_like(VV, dtype=out_np_dtype)
+                out_pad.fill(np.nan)
 
-                # Crop to block
+                # Numerical threshold: small but nonzero
+                eps = np.finfo(WW.dtype).eps
+                mask_valid_weight = WW > eps
+
+                # Compute filtered values where we have any valid neighbor support
+                out_pad[mask_valid_weight] = VV[mask_valid_weight] / WW[mask_valid_weight]
+
+                # Choose data sentinel: use src nodata if present and preserved; else NaN
+                if preserve_input_nodata and src_nodata is not None and not (isinstance(src_nodata, float) and np.isnan(src_nodata)):
+                    out_nodata_data = src_nodata
+                else:
+                    out_nodata_data = np.nan
+
+                # Preserve original invalids AND fill zero-weight cells
+                out_pad[ind_nan] = out_nodata_data
+                out_pad[~mask_valid_weight] = out_nodata_data
+
+                # Crop back to the exact output tile
                 row0 = win.row_off - row_off
                 row1 = row0 + win.height
                 col0 = win.col_off - col_off
                 col1 = col0 + win.width
 
                 out_block = out_pad[row0:row1, col0:col1]
-
                 dst.write(out_block, 1, window=win)
 
-            # Provenance
+            # Tags / provenance
             dst.update_tags(
                 smoothing="gaussian_blockwise",
                 smoothing_sigma=str(smooth_size),
                 smoothing_truncate=str(truncate),
                 smoothing_halo=str(halo),
-                smoothing_note="Blockwise NaN-preserving Gaussian smoothing with halo",
+                input_nodata=str(src_nodata),
+                output_nodata=("None" if out_nodata_tag is None else str(out_nodata_tag)),
+                note="Blockwise nodata/NaN‑preserving Gaussian smoothing with halo",
+                blockxsize=str(block_w),
+                blockysize=str(block_h),
+                mode=mode,
             )
 
-    # Finalize in-place operation
-    if in_place:
-        temp_dir.cleanup()  # not yet—wait!
-        # Replace original raster
-        shutil.move(str(actual_out), str(in_fn))
-        # Workaround: we created a TemporaryDirectory, delete structure but not smoothed file
-        # But since we moved the file out, the tempdir is empty:
-        shutil.rmtree(temp_dir.name, ignore_errors=True)
 
 
 # =============================================================================
