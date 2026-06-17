@@ -1378,22 +1378,22 @@ def bin_raster(
     bins_dict: Mapping[str, object],
     out_fn: Path,
 ) -> None:
-    """Block-wise hazard-category binning of a float raster -> uint8 GeoTIFF.
-
-    Input is a dictionary with at least:
-      - IDs:       bins_dict["ID"]          (array-like)
-      - Category:  bins_dict["Category"]    (list of str)
-      - Label:     bins_dict["VD_Label"]    (list of str)
-      - Lower edge (meters or relevant units): bins_dict["VD_Min"] (array-like)
-      - Upper edge (meters or relevant units): bins_dict["VD_Max"] (array-like)
-
-    Bin convention (np.digitize, right=False):
-      0      below first lower edge (treated as no-hazard / dry)
-      1..N   bin index for values in [VD_Min[i], VD_Min[i+1]) ; last bin -> [VD_Min[N-1], +inf)
-      255    nodata (non-finite source pixel)
-
-    TIFF tags capture the dictionary attributes at both summary and per-bin levels.
     """
+    Block-wise hazard-category binning of a float raster -> uint8 GeoTIFF.
+
+    Classification uses np.digitize(..., right=False) with edges = VD_Min:
+      - 1..N : bin index based on lower-bound edges: [VD_Min[i], VD_Min[i+1]); last bin -> [VD_Min[N-1], +inf)
+      - 255  : nodata (non-finite source pixel, explicit src.nodata sentinel if present,
+                       or value below the first lower edge)
+
+    Notes
+    -----
+    - Only VD_Min is used as binning edges; VD_Max is validated and written to tags, but not used to truncate bins.
+    - Output is uint8, single-band, tiled, deflate-compressed.
+    - Tiling reuses the source block sizes when available; otherwise defaults to 512x512.
+    - Bins whose ID == 0 are treated as NoData and written as 255.
+    """
+
     in_fn = Path(in_fn)
     out_fn = Path(out_fn)
     out_fn.parent.mkdir(parents=True, exist_ok=True)
@@ -1404,7 +1404,7 @@ def bin_raster(
     if missing:
         raise ValueError(f"bins_dict missing required keys: {missing}")
 
-    ids = np.asarray(bins_dict["ID"])
+    ids = np.asarray(bins_dict["ID"], dtype=np.int64)
     cats = list(bins_dict["Category"])
     labels = list(bins_dict["VD_Label"])
     vmin = np.asarray(bins_dict["VD_Min"], dtype=np.float32)
@@ -1418,37 +1418,62 @@ def bin_raster(
             f"VD_Min={vmin.size}, VD_Max={vmax.size}"
         )
 
-    # Optional sanity checks (kept minimal)
     if n > 1 and not np.all(np.diff(vmin) > 0):
         raise ValueError("bins_dict['VD_Min'] must be strictly increasing.")
     if not np.all(vmin <= vmax):
         raise ValueError("Each bin must satisfy VD_Min <= VD_Max.")
 
-    # Use lower bounds as edges for np.digitize
+    # Lower bounds as edges for np.digitize
     edges = vmin
 
     with rasterio.open(in_fn) as src:
+        # Enforce single-band input
+        if src.count != 1:
+            raise ValueError(f"Expected single-band input; got src.count={src.count}")
+
+        src_nodata = src.nodata  # may be None
+
+        # Reuse source tiling if available; else default 512x512
+        src_block_x = src.profile.get("blockxsize")
+        src_block_y = src.profile.get("blockysize")
+        blockx = int(src_block_x) if src_block_x else 512
+        blocky = int(src_block_y) if src_block_y else 512
+
         meta = src.meta.copy()
         meta.update(
             dtype="uint8",
             nodata=255,
             count=1,
             tiled=True,
-            blockxsize=256,
-            blockysize=256,
+            blockxsize=blockx,
+            blockysize=blocky,
             compress="deflate",
-            BIGTIFF="YES",
+            BIGTIFF="IF_SAFER",
         )
+
         with rasterio.open(out_fn, "w", **meta) as dst:
             for _, window in src.block_windows(1):
                 block = src.read(1, window=window).astype(np.float32)
 
-                bins = np.digitize(block, edges, right=False).astype(np.uint8)  # 0..N
-                # Clamp to N to ensure the "last bin -> +inf" behavior
+                # Classify: 0..N with lower-bound edges
+                bins = np.digitize(block, edges, right=False).astype(np.uint8)
                 bins = np.minimum(bins, n).astype(np.uint8)
 
-                # Mark non-finite as nodata
-                bins[~np.isfinite(block)] = 255
+                # Below first edge -> nodata
+                bins[bins == 0] = 255
+
+                # Non-finite and explicit finite src.nodata -> nodata
+                nonfinite = ~np.isfinite(block)
+                if src_nodata is not None:
+                    nodata_mask = nonfinite | (block == src_nodata)
+                else:
+                    nodata_mask = nonfinite
+                bins[nodata_mask] = 255
+
+                # NEW: bins whose corresponding ID == 0 -> nodata
+                if np.any(ids == 0):
+                    zero_bin_indices = np.nonzero(ids == 0)[0] + 1  # bin indices are 1..N
+                    bins[np.isin(bins, zero_bin_indices)] = 255
 
                 dst.write(bins, 1, window=window)
 
@@ -1463,9 +1488,12 @@ def bin_raster(
                 "bin_min": ",".join(_fmt(float(v)) for v in vmin),
                 "bin_max": ",".join(_fmt(float(v)) for v in vmax),
                 "nodata_label": "nodata",
-                "bin_0_label": "below_first_edge",
+                "nodata_value": "255",
+                "below_first_edge_is_nodata": "True",
+                "binning_edges": "VD_Min",
+                "binning_right": "False",
+                "id_zero_is_nodata": "True",
             }
-            # Per-bin details: bin_1..bin_N
             for i in range(n):
                 idx = i + 1
                 tags[f"bin_{idx}_id"] = str(int(ids[i]))
@@ -1474,7 +1502,7 @@ def bin_raster(
                 tags[f"bin_{idx}_min"] = _fmt(float(vmin[i]))
                 tags[f"bin_{idx}_max"] = _fmt(float(vmax[i]))
 
-            dst.update_tags(**tags)
+
 
 
 def bin_depth_with_overlays(
@@ -1670,7 +1698,6 @@ def raster_to_polygons(
     driver: Optional[str] = None,
     labels: Optional[pd.DataFrame | Mapping[str, Any]] = None,
     label_key: str = "ID",
-    strict_labels: bool = False,
 ) -> gpd.GeoDataFrame:
     """
     Polygonize a categorical (integer) raster into a vector dataset, with optional
@@ -1697,8 +1724,6 @@ def raster_to_polygons(
         If a dict is provided, it is converted to a DataFrame.
     label_key : str, default='ID'
         Name of the key column in `labels` used to join to polygon 'ID'.
-    strict_labels : bool, default=False
-        If True, raises if any polygon IDs are missing from the label table.
 
     Returns
     -------
@@ -1809,15 +1834,6 @@ def raster_to_polygons(
         if label_key != "ID":
             # Keep 'ID' as the canonical code; drop the label key column to avoid duplication
             gdf = gdf.drop(columns=[label_key])
-
-        if strict_labels:
-            missing = gdf[gdf.filter(like="ID").columns[0]].isna().sum()  # defensive
-            # Or stricter: check rows with any NaNs introduced by join
-            missing_ids = gdf.loc[gdf.isna().any(axis=1), "ID"].unique().tolist()
-            if missing_ids:
-                raise ValueError(
-                    f"The label table is missing mappings for IDs: {missing_ids}"
-                )
 
     # Write to disk
     if vector_file:

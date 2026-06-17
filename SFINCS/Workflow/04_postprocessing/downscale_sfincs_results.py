@@ -111,7 +111,7 @@ hmin = 0.02  # wet threshold [m], used everywhere
 
 # --- smoothing ---
 smoothing = True  # whether to run the smoothing step at all
-smooth_size = 6  # sigma for gaussian filter
+smooth_size = 16  # sigma for gaussian filter
 
 
 # --- hazard binning ---
@@ -599,12 +599,11 @@ if run_shapefiles:
                 raster_file=d_bins_fn,
                 vector_file=dbins_shp_fn,
                 connectivity=8,
-                min_pixels=25,  # drop patches < 25 pixels
+                min_pixels=50,  # drop patches < 50 pixels
                 dissolve=True,  # merge polygons by class ID
                 driver="ESRI Shapefile",
                 labels=depth_bins,  # assign labels to the bins; must align with bin edges
                 label_key="ID",
-                strict_labels=True,  # error if any ID in raster lacks a label
             )
 
             print(
@@ -627,12 +626,10 @@ if run_shapefiles:
                 raster_file=q_bins_fn,
                 vector_file=qbins_shp_fn,
                 connectivity=8,
-                min_pixels=25,  # drop patches < 25 pixels
+                min_pixels=50,  # drop patches < 50 pixels
                 dissolve=True,  # merge polygons by class ID
-                labels=depth_bins,  # assign labels to the bins; must align with bin edges
-                label_key="ID",
-                strict_labels=True,  # error if any ID in raster lacks a label
-            )
+                labels=qmax_bins,  # assign labels to the bins; must align with bin edges
+                label_key="ID",            )
 
             print(
                 f"  {helper.rp_tag(rp)}/qmax_bins: {qbins_shp_fn.name} ({time.time() - t0:.1f}s)"
