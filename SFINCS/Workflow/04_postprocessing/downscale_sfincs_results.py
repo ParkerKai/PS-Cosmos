@@ -62,20 +62,6 @@ import ps_cosmos_postprocess_helper as helper
 sfincs_root = Path(r"D:\Kai\DataDownloads\Snohomish_20260514")
 bnd_file = os.path.join(sfincs_root, "sfincs.bnd")
 
-# Discover one SFINCS run directory per water year.
-sfincs_dirs = sorted(
-    p
-    for p in sfincs_root.iterdir()
-    if p.is_dir()
-    and p.name.isdigit()
-    and len(p.name) == 4
-    and (p / "sfincs_map.nc").exists()
-)
-print(
-    f"Found {len(sfincs_dirs)} water-year runs: "
-    f"{sfincs_dirs[0].name}..{sfincs_dirs[-1].name}"
-)
-
 # DEM + index COG
 dem_res = 1  # DEM resolution [m]
 dem_file = Path(r"D:\Kai\DataDownloads\Snohomish_MosaicDEM_modded.tif")
@@ -109,9 +95,13 @@ downscale_method = "bilinear"  # "raw" | "constant" | "bilinear"
 dilation = 0.5  # None to disable; only used for bilinear
 hmin = 0.02  # wet threshold [m], used everywhere
 
+# --- clipping ---
+clip_extent = True  # whether to clip the downscaled rasters to a polgyon
+clip_polygon = Path(r'D:\Kai\SFINCS\GIS\Snohomish_ClippingPolygon.shp')
+
 # --- smoothing ---
 smoothing = True  # whether to run the smoothing step at all
-smooth_size = 16  # sigma for gaussian filter
+smooth_size = 20  # sigma for gaussian filter
 
 
 # --- hazard binning ---
@@ -121,7 +111,7 @@ smooth_size = 16  # sigma for gaussian filter
 #     (standing water that was disconnected from the boundary)
 # See helper.bin_depth_with_overlays for the full code mapping.
 
-## Depth  Categories
+#  --- Depth  Categories --- 
 depth_bins = {
     "ID": np.array([1, 2, 3, 4, 5], dtype="int16"),
     "Category": ["Low", "Medium", "High", "VeryHigh", "Extreme"],
@@ -133,7 +123,7 @@ depth_bins = {
 
 mhhw_elevation = 2.748  # MHHW [m, NAVD88]; Everett station 9447130, ~2.62 m. Verify against DEM datum.
 
-## Depth Velocity Categories
+# ---  Depth Velocity Categories --- 
 qmax_bins = {
     "ID": np.array([1, 2, 3, 4, 5], dtype="int16"),
     "Category": ["Low", "Medium", "High", "VeryHigh", "Extreme"],
@@ -154,6 +144,24 @@ run_shapefiles = True
 
 # Index COG block size (only used when (re)building the index COG)
 NRMAX = 2000
+
+
+
+# Discover one SFINCS run directory per water year.
+sfincs_dirs = sorted(
+    p
+    for p in sfincs_root.iterdir()
+    if p.is_dir()
+    and p.name.isdigit()
+    and len(p.name) == 4
+    and (p / "sfincs_map.nc").exists()
+)
+print(
+    f"Found {len(sfincs_dirs)} water-year runs: "
+    f"{sfincs_dirs[0].name}..{sfincs_dirs[-1].name}"
+)
+
+
 
 # =============================================================================
 # Derived paths + sanity
@@ -328,6 +336,11 @@ if run_downscale:
         "face count mismatch between EVA dataset and SFINCS model; "
         "the aggregated NetCDF was likely built from a different quadtree."
     )
+
+    if clip_extent:
+        print(f"  loading clipping polygon from {clip_polygon}")
+        clip_gdf = helper.load_clip_polygon(clip_polygon)
+
     for rp in return_periods:
         h_fn = paths.hmax(rp)
         z_fn = paths.zsmax(rp)
@@ -352,6 +365,10 @@ if run_downscale:
         )
         if downscale_method == "bilinear" and dilation:
             kw["dilation"] = dilation
+
+        if clip_extent:
+            kw["gdf_mask"] = clip_gdf
+
         downscaling.downscale_floodmap(**kw)
         step_tags = {
             "return_period": int(round(rp)),
@@ -589,10 +606,13 @@ if run_shapefiles:
         ############ depth bins ###########
         dbins_shp_fn = paths.depth_shapefile(rp)
         d_bins_fn = paths.depth_bins(rp)
-        if d_bins_fn.exists():
+        if not d_bins_fn.exists():
+            print(
+                f"  skip {helper.rp_tag(rp)}/depth_bins: depth bins raster not available"
+            )
+            continue
+        if dbins_shp_fn.exists():
             print(f"  skip {helper.rp_tag(rp)}/depth_bins: exists")
-        elif not d_bins_fn.exists():
-            print(f"  skip {helper.rp_tag(rp)}/depth_bins: depth bins raster not found")
         else:
             t0 = time.time()
             gdf = helper.raster_to_polygons(

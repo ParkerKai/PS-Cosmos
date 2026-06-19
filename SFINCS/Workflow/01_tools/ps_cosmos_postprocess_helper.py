@@ -1116,14 +1116,22 @@ def map_quadtree_to_dem_nearest(
             if dep_src is not None:
                 dep_src.close()
 
-from pathlib import Path
-from typing import Optional
-import math
 
-import numpy as np
-import rasterio
-from rasterio.windows import Window
-from scipy.ndimage import gaussian_filter
+def load_clip_polygon(shapefile_path):
+    """
+    Load a shapefile and return it as a GeoDataFrame.
+
+    Parameters
+    ----------
+    shapefile_path : str or path-like
+        Path to the shapefile (.shp) or directory containing it.
+
+    Returns
+    -------
+    geopandas.GeoDataFrame
+        The loaded shapefile as a GeoDataFrame.
+    """
+    return gpd.read_file(shapefile_path)
 
 
 def smooth_raster_gaussian_blockwise(
