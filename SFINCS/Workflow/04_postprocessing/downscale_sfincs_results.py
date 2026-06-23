@@ -49,7 +49,7 @@ TOOLS_DIR = WORKFLOW_DIR / "01_tools"  # ./workflow/01_tools
 # Prepend tools folder to sys.path so Python can find the module
 sys.path.insert(0, str(TOOLS_DIR))
 
-# Now import by filename (without .py)
+# Now import
 import ps_cosmos_postprocess_helper as helper
 
 
@@ -97,11 +97,11 @@ hmin = 0.02  # wet threshold [m], used everywhere
 
 # --- clipping ---
 clip_extent = True  # whether to clip the downscaled rasters to a polgyon
-clip_polygon = Path(r'D:\Kai\SFINCS\GIS\Snohomish_ClippingPolygon.shp')
+clip_polygon = Path(r"D:\Kai\SFINCS\GIS\Snohomish_ClippingPolygon.shp")
 
 # --- smoothing ---
 smoothing = True  # whether to run the smoothing step at all
-smooth_size = 20  # sigma for gaussian filter
+smooth_size = 22  # sigma for gaussian filter
 
 
 # --- hazard binning ---
@@ -111,7 +111,7 @@ smooth_size = 20  # sigma for gaussian filter
 #     (standing water that was disconnected from the boundary)
 # See helper.bin_depth_with_overlays for the full code mapping.
 
-#  --- Depth  Categories --- 
+#  --- Depth  Categories ---
 depth_bins = {
     "ID": np.array([1, 2, 3, 4, 5], dtype="int16"),
     "Category": ["Low", "Medium", "High", "VeryHigh", "Extreme"],
@@ -121,9 +121,9 @@ depth_bins = {
     "D_Max": np.array([0.1524, 0.3048, 0.9144, 1.524, np.inf]),
 }
 
-mhhw_elevation = 2.748  # MHHW [m, NAVD88]; Everett station 9447130, ~2.62 m. Verify against DEM datum.
+# mhhw_elevation = 2.748  # MHHW [m, NAVD88]; Everett station 9447130, ~2.62 m. Verify against DEM datum.
 
-# ---  Depth Velocity Categories --- 
+# ---  Depth Velocity Categories ---
 qmax_bins = {
     "ID": np.array([1, 2, 3, 4, 5], dtype="int16"),
     "Category": ["Low", "Medium", "High", "VeryHigh", "Extreme"],
@@ -146,7 +146,6 @@ run_shapefiles = True
 NRMAX = 2000
 
 
-
 # Discover one SFINCS run directory per water year.
 sfincs_dirs = sorted(
     p
@@ -160,7 +159,6 @@ print(
     f"Found {len(sfincs_dirs)} water-year runs: "
     f"{sfincs_dirs[0].name}..{sfincs_dirs[-1].name}"
 )
-
 
 
 # =============================================================================
@@ -512,7 +510,6 @@ if run_binning:
                 dem_fn=dem_file,
                 depth_bins=depth_bins,
                 out_fn=d_bins_fn,
-                mhhw_elevation=mhhw_elevation,
             )
 
             helper.stamp_provenance(
@@ -523,7 +520,7 @@ if run_binning:
                 source_depth=Path(h_for_bin).name,
                 source_connection=Path(c_fn).name,
                 source_dem=Path(dem_file).name,
-                mhhw_elevation=mhhw_elevation if mhhw_elevation is not None else "",
+                units="meters",
             )
             print(
                 f"  {helper.rp_tag(rp)}/depth_bins: {d_bins_fn.name} ({time.time() - t0:.1f}s)"
@@ -590,9 +587,9 @@ if run_shapefiles:
                 connected_shp=extentConn_shp_fn,
                 disconnected_shp=extentDisConn_shp_fn,
                 connectivity=8,  # diagonals count as connected
-                min_pixels=10,  # remove speckle < 10 pixels
+                min_pixels=30,  # remove speckle < 10 pixels
                 fix_invalid=True,
-                simplify_tolerance=None,  # e.g., set to 1.0 if CRS is projected and you want lighter files
+                simplify_tolerance=1,  # e.g., set to 1.0 if CRS is projected and you want lighter files
                 driver="ESRI Shapefile",
             )
 
@@ -619,11 +616,12 @@ if run_shapefiles:
                 raster_file=d_bins_fn,
                 vector_file=dbins_shp_fn,
                 connectivity=8,
-                min_pixels=50,  # drop patches < 50 pixels
+                min_pixels=30,  # drop patches < 50 pixels
                 dissolve=True,  # merge polygons by class ID
                 driver="ESRI Shapefile",
                 labels=depth_bins,  # assign labels to the bins; must align with bin edges
                 label_key="ID",
+                simplify_tolerance=1,
             )
 
             print(
@@ -646,10 +644,12 @@ if run_shapefiles:
                 raster_file=q_bins_fn,
                 vector_file=qbins_shp_fn,
                 connectivity=8,
-                min_pixels=50,  # drop patches < 50 pixels
+                min_pixels=30,  # drop patches < 50 pixels
                 dissolve=True,  # merge polygons by class ID
                 labels=qmax_bins,  # assign labels to the bins; must align with bin edges
-                label_key="ID",            )
+                label_key="ID",
+                simplify_tolerance=1,
+            )
 
             print(
                 f"  {helper.rp_tag(rp)}/qmax_bins: {qbins_shp_fn.name} ({time.time() - t0:.1f}s)"

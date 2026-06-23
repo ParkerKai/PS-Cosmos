@@ -23,8 +23,6 @@ from pathlib import Path
 from typing import List, Literal, Optional, Sequence, Tuple, Mapping, Any
 import os
 from dataclasses import dataclass
-import tempfile
-import shutil
 
 import numpy as np
 import pandas as pd
@@ -37,6 +35,7 @@ import geopandas as gpd
 from shapely.geometry import shape
 from rasterio.features import shapes, sieve
 from rasterio.windows import Window
+from pyproj import CRS
 
 
 # =============================================================================
@@ -1512,38 +1511,30 @@ def bin_raster(
 
 
 
-
 def bin_depth_with_overlays(
     hmax_masked_fn: Path,
     connection_fn: Path,
     dem_fn: Path,
     depth_bins: Mapping[str, object],
     out_fn: Path,
-    mhhw_elevation: Optional[float] = None,
-    below_mhhw_label: str = "Below MHHW",
     floodprone_label: str = "Flood-prone Low-Lying",
 ) -> None:
-    """Categorical depth raster with MHHW + flood-prone overlays.
+    """Categorical depth raster with flood-prone overlay (no MHHW).
 
-    Block-by-block compositing of three rasters into one uint8 GeoTIFF.
-
-    Code mapping (all on the DEM grid):
-
+    Code mapping (on the DEM grid):
     ===========  =====================================================
     Code         Source / meaning
     ===========  =====================================================
-    0            dry / no flooding
-    1            Below MHHW (only set when mhhw_elevation is not None
-                 AND dem < mhhw_elevation; takes precedence so tidally-
-                 submerged channels are not labelled as flood hazard)
-    2..N+1       depth bins (N = len(depth_bins["D_Min"]); code i+2
+    1..N         depth bins (N = len(depth_bins["D_Min"]); code i
                  corresponds to bin i in depth_bins arrays)
-    N+2          Flood-prone Low-Lying (`connection == 2`)
-    255          nodata (non-finite DEM)
+    N+1          Flood-prone Low-Lying (`connection == 2`)
+    255          dry / no flooding **and** nodata (non-finite DEM)
     ===========  =====================================================
 
-    Tags are updated to reflect the dictionary inputs: IDs, Category,
-    Depth_Label_ft, Depth_Label_m, D_Min, D_Max, and per-code details.
+    Notes:
+    - 255 is both a valid category ("dry") and set as GeoTIFF nodata.
+    - There is no 0-category. Any value below the first bin edge
+      remains 255 (dry).
     """
     hmax_masked_fn = Path(hmax_masked_fn)
     connection_fn = Path(connection_fn)
@@ -1552,7 +1543,6 @@ def bin_depth_with_overlays(
     out_fn.parent.mkdir(parents=True, exist_ok=True)
 
     # --- Extract and validate depth_bins ---
-    # Required keys: ID, Category, Depth_Label_ft, Depth_Label_m, D_Min, D_Max
     required = ("ID", "Category", "Depth_Label_ft", "Depth_Label_m", "D_Min", "D_Max")
     missing = [k for k in required if k not in depth_bins]
     if missing:
@@ -1566,136 +1556,127 @@ def bin_depth_with_overlays(
     dmax = np.asarray(depth_bins["D_Max"], dtype=np.float32)
 
     n_depth_bins = dmin.size
-    if not (
-        len(ids) == len(cats) == len(lbl_ft) == len(lbl_m) == dmin.size == dmax.size
-    ):
+    if not (len(ids) == len(cats) == len(lbl_ft) == len(lbl_m) == dmin.size == dmax.size):
         raise ValueError(
             "All depth_bins arrays/lists must have the same length: "
             f"ID={len(ids)}, Category={len(cats)}, Depth_Label_ft={len(lbl_ft)}, "
             f"Depth_Label_m={len(lbl_m)}, D_Min={dmin.size}, D_Max={dmax.size}"
         )
 
-    # Optional sanity: D_Min strictly increasing; D_Max non-decreasing & D_Min[i] <= D_Max[i]
-    # (kept minimal; comment out if you want to allow plateaus)
     if n_depth_bins > 1 and not np.all(np.diff(dmin) > 0):
         raise ValueError("depth_bins['D_Min'] must be strictly increasing.")
     if not np.all(dmin <= dmax):
         raise ValueError("Each bin must satisfy D_Min <= D_Max.")
 
-    below_mhhw_code = 1
-    depth_code_offset = 2  # depth bins -> 2 .. n_depth_bins+1
-    floodprone_code = n_depth_bins + depth_code_offset  # next code after deepest bin
-
+    # Codes: bins 1..N; flood-prone N+1; dry/nodata 255
+    depth_code_offset = 1
+    floodprone_code = n_depth_bins + depth_code_offset  # N+1
     if floodprone_code >= 255:
         raise ValueError(
             f"Too many depth bins ({n_depth_bins}); floodprone_code "
-            f"would be {floodprone_code} >= 255 (nodata)."
+            f"would be {floodprone_code} >= 255 (reserved for dry/nodata)."
         )
 
-    # Prepare output metadata from the hmax source
-    with rasterio.open(hmax_masked_fn) as src:
-        meta = src.meta.copy()
-    meta.update(
-        count=1,
-        dtype="uint8",
-        nodata=255,
-        tiled=True,
-        blockxsize=256,
-        blockysize=256,
-        compress="deflate",
-        BIGTIFF="YES",
-    )
+    # Open sources and verify grid alignment
+    with rasterio.open(hmax_masked_fn) as hsrc, \
+         rasterio.open(connection_fn) as csrc, \
+         rasterio.open(dem_fn) as dsrc:
 
-    with (
-        rasterio.open(out_fn, "w", **meta) as dst,
-        rasterio.open(hmax_masked_fn) as hsrc,
-        rasterio.open(connection_fn) as csrc,
-        rasterio.open(dem_fn) as dsrc,
-    ):
-        for _, window in dst.block_windows(1):
-            h = hsrc.read(1, window=window).astype(np.float32)
-            c = csrc.read(1, window=window)
-            d = dsrc.read(1, window=window).astype(np.float32)
-
-            out = np.zeros(h.shape, dtype=np.uint8)  # 0 = dry / default
-
-            # nodata: non-finite DEM (outside model domain)
-            dem_nodata = ~np.isfinite(d)
-            out[dem_nodata] = 255
-
-            # below MHHW (only where the DEM is finite); wins over all else
-            if mhhw_elevation is not None:
-                below = (~dem_nodata) & (d < float(mhhw_elevation))
-                out[below] = below_mhhw_code
-            else:
-                below = np.zeros(h.shape, dtype=bool)
-
-            # depth bins for pixels NOT below MHHW and with finite depth > 0
-            wet = (~below) & (~dem_nodata) & np.isfinite(h) & (h > 0.0)
-            if np.any(wet):
-                # Use D_Min as lower edges; clamp to N to avoid collision with floodprone_code.
-                bins = np.digitize(h, dmin, right=False).astype(np.int16)  # 0 .. N+1
-                bins[~wet] = 0
-                bins = np.minimum(
-                    bins, n_depth_bins
-                )  # force deepest values into deepest bin (0..N)
-                # Shift wet bins (1..N) into the [2..N+1] depth-code range
-                shifted = np.where(bins >= 1, bins + (depth_code_offset - 1), 0).astype(
-                    np.uint8
-                )
-                out[wet] = shifted[wet]
-
-            # flood-prone low-lying: connection == 2, but only where NOT
-            # below MHHW and NOT already a real depth bin
-            disconnected = (
-                (~below) & (~dem_nodata) & (c == 2) & ((out == 0) | (out == 255))
+        def _same_grid(a, b) -> bool:
+            return (
+                a.width == b.width and
+                a.height == b.height and
+                a.transform == b.transform and
+                a.crs == b.crs
             )
-            out[disconnected] = floodprone_code
 
-            dst.write(out, 1, window=window)
+        if not _same_grid(hsrc, csrc):
+            raise ValueError("Grid mismatch: 'connection_fn' does not match 'hmax_masked_fn' (width/height/transform/crs).")
+        if not _same_grid(hsrc, dsrc):
+            raise ValueError("Grid mismatch: 'dem_fn' does not match 'hmax_masked_fn' (width/height/transform/crs).")
 
-        # --- Tags for downstream legend rendering (dictionary-based) ---
-        def _fmt(v):
-            return f"{v:g}" if np.isfinite(v) else ("-inf" if v < 0 else "inf")
+        # Prepare output metadata from the hmax source
+        meta = hsrc.meta.copy()
+        meta.update(
+            count=1,
+            dtype="uint8",
+            nodata=255,       # <-- nodata is 255 (same as 'dry')
+            tiled=True,
+            blockxsize=256,
+            blockysize=256,
+            compress="deflate",
+            BIGTIFF="YES",
+        )
 
-        tags = {
-            # High-level bin descriptors
-            "bin_ids": ",".join(str(int(i)) for i in ids),
-            "bin_category": ",".join(str(s) for s in cats),
-            "bin_label_ft": ",".join(str(s) for s in lbl_ft),
-            "bin_label_m": ",".join(str(s) for s in lbl_m),
-            "bin_min_m": ",".join(_fmt(v) for v in dmin),
-            "bin_max_m": ",".join(_fmt(v) for v in dmax),
-            # Overlay codes
-            "code_0_label": "dry",
-            "below_mhhw_code": str(below_mhhw_code),
-            f"code_{below_mhhw_code}_label": below_mhhw_label,
-            "floodprone_code": str(floodprone_code),
-            f"code_{floodprone_code}_label": floodprone_label,
-            # Nodata labels
-            "nodata_label": "nodata",
-            "code_255_label": "nodata",
-        }
+        with rasterio.open(out_fn, "w", **meta) as dst:
+            for _, window in dst.block_windows(1):
+                h = hsrc.read(1, window=window).astype(np.float32)
+                c = csrc.read(1, window=window)
+                d = dsrc.read(1, window=window).astype(np.float32)
 
-        # Per-code details (retain generic code_*_label for compatibility; use Category)
-        for i in range(n_depth_bins):
-            code = i + depth_code_offset
-            tags[f"code_{code}_label"] = str(cats[i])  # generic label = Category
-            tags[f"code_{code}_category"] = str(cats[i])
-            tags[f"code_{code}_label_ft"] = str(lbl_ft[i])
-            tags[f"code_{code}_label_m"] = str(lbl_m[i])
-            tags[f"code_{code}_id"] = str(int(ids[i]))
-            tags[f"code_{code}_min_m"] = _fmt(float(dmin[i]))
-            tags[f"code_{code}_max_m"] = _fmt(float(dmax[i]))
+                # Default is DRY (255), which is also nodata
+                out = np.full(h.shape, 255, dtype=np.uint8)
 
-        if mhhw_elevation is not None:
-            tags["mhhw_elevation_m"] = f"{float(mhhw_elevation):g}"
+                # non-finite DEM -> also 255 (nodata/dry)
+                dem_nodata = ~np.isfinite(d)
+                out[dem_nodata] = 255
+
+                # depth bins where DEM is finite and depth > 0
+                wet = (~dem_nodata) & np.isfinite(h) & (h > 0.0)
+                if np.any(wet):
+                    # Digitize by lower edges; 0..N where 0 = below first bin (stays 255 dry)
+                    bins = np.digitize(h, dmin, right=False).astype(np.int16)
+                    bins[~wet] = 0
+                    bins = np.minimum(bins, n_depth_bins)  # clamp deepest to N
+
+                    # Shift bin codes to 1..N; keep others at 255 (dry)
+                    shifted = np.where(bins >= 1, bins + (depth_code_offset - 0), 255).astype(np.uint8)
+                    out[wet] = shifted[wet]
+
+                # flood-prone low-lying: connection == 2, only where still dry (255)
+                disconnected = (~dem_nodata) & (c == 2) & (out == 255)
+                out[disconnected] = floodprone_code
+
+                dst.write(out, 1, window=window)
+
+            # --- Tags for downstream legend rendering (dictionary-based) ---
+            def _fmt(v):
+                return f"{v:g}" if np.isfinite(v) else ("-inf" if v < 0 else "inf")
+
+            tags = {
+                # High-level bin descriptors
+                "bin_ids": ",".join(str(int(i)) for i in ids),
+                "bin_category": ",".join(str(s) for s in cats),
+                "bin_label_ft": ",".join(str(s) for s in lbl_ft),
+                "bin_label_m": ",".join(str(s) for s in lbl_m),
+                "bin_min_m": ",".join(_fmt(v) for v in dmin),
+                "bin_max_m": ",".join(_fmt(v) for v in dmax),
+                # Overlay codes
+                "floodprone_code": str(floodprone_code),
+                f"code_{floodprone_code}_label": floodprone_label,
+                # Dry / nodata
+                "code_255_label": "dry",   # presentation label (but masked as nodata by many viewers)
+                "nodata_label": "dry",     # explicitly state nodata is also 255/dry
+            }
+
+            # Per-code details for 1..N
+            for i in range(n_depth_bins):
+                code = i + depth_code_offset  # 1..N
+                tags[f"code_{code}_label"] = str(cats[i])  # generic label = Category
+                tags[f"code_{code}_category"] = str(cats[i])
+                tags[f"code_{code}_label_ft"] = str(lbl_ft[i])
+                tags[f"code_{code}_label_m"] = str(lbl_m[i])
+                tags[f"code_{code}_id"] = str(int(ids[i]))
+                tags[f"code_{code}_min_m"] = _fmt(float(dmin[i]))
+                tags[f"code_{code}_max_m"] = _fmt(float(dmax[i]))
+
+            # Write tags
+            dst.update_tags(**tags)
 
 
 # =============================================================================
 # SECTION 5: Shapefile
 # =============================================================================
-
 
 def raster_to_polygons(
     raster_file: str,
@@ -1706,10 +1687,12 @@ def raster_to_polygons(
     driver: Optional[str] = None,
     labels: Optional[pd.DataFrame | Mapping[str, Any]] = None,
     label_key: str = "ID",
+    # --- NEW: simplification knobs ---
+    simplify_tolerance: Optional[float] = None,
 ) -> gpd.GeoDataFrame:
     """
     Polygonize a categorical (integer) raster into a vector dataset, with optional
-    attribute labeling from a user-provided table.
+    attribute labeling from a user-provided table, and optional geometry simplification.
 
     Parameters
     ----------
@@ -1732,6 +1715,9 @@ def raster_to_polygons(
         If a dict is provided, it is converted to a DataFrame.
     label_key : str, default='ID'
         Name of the key column in `labels` used to join to polygon 'ID'.
+    simplify_tolerance : float | None, default=None
+        If provided, applies `geometry.simplify(simplify_tolerance, preserve_topology=...)`
+        AFTER optional dissolve and BEFORE label join. Units are in the GeoDataFrame CRS.
 
     Returns
     -------
@@ -1746,6 +1732,9 @@ def raster_to_polygons(
         * If nodata is None, all values are included.
     - `sieve` operates on integer arrays; we do not cast — the function will error if
       the band is not integer.
+    - Simplification:
+        * `simplify_tolerance` is in CRS units. In geographic CRS (degrees), use small values.
+        * Applied after dissolve, so shared boundaries within the same ID are simplified together.
     - Label table:
         * Duplicated keys in `labels[label_key]` are dropped (first occurrence kept).
         * Infinite values in numeric label columns are converted to NaN/None so drivers
@@ -1807,9 +1796,28 @@ def raster_to_polygons(
     if not gdf.empty:
         gdf = gdf[~gdf.geometry.is_empty].reset_index(drop=True)
 
-    # Optional dissolve by ID
+    # ---Optional dissolve by ID ----
     if dissolve and not gdf.empty:
         gdf = gdf.dissolve(by="ID", as_index=False)
+
+    # --- Optional geometry simplification ---
+   
+    if simplify_tolerance is not None and not gdf.empty:
+        crs_type = _crs_kind(gdf.crs)
+        if crs_type != "projected":
+            # Hard guardrail: raise
+            raise ValueError(
+                f"Simplification tolerance is interpreted in CRS units, but the layer CRS is "
+                f"'{crs_type}'. Please reproject to a projected CRS (e.g., meters/feet) before "
+                f"simplifying, or set enforce_projected_for_simplify=False if you intend to "
+                f"simplify in degrees."
+            )
+
+        # Simplify
+        gdf["geometry"] = gdf.geometry.simplify(
+            float(simplify_tolerance),
+            preserve_topology=True,
+        )
 
     # --- Optional label join ---
     if labels is not None and not gdf.empty:
@@ -1971,3 +1979,26 @@ def export_connectivity_regions(
             )
 
     return gdf_conn, gdf_disc
+
+
+def _crs_kind(crs) -> str:
+    """
+    Classify CRS as 'projected', 'geographic', or 'unknown'.
+    Works with rasterio.crs.CRS, pyproj.CRS, EPSG strings/ints, WKT, etc.
+    """
+    if crs is None:
+        return "unknown"
+    try:
+        # Normalize to pyproj.CRS
+        if hasattr(crs, "to_wkt"):
+            crs_py = CRS.from_wkt(crs.to_wkt())
+        else:
+            crs_py = CRS.from_user_input(crs)
+    except Exception:
+        return "unknown"
+
+    if crs_py.is_projected:
+        return "projected"
+    if crs_py.is_geographic:
+        return "geographic"
+    return "unknown"
