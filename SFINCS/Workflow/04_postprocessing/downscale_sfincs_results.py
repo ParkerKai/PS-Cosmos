@@ -376,6 +376,28 @@ if run_downscale:
         helper.stamp_provenance(h_fn, **base_tags, **step_tags, variable="hmax")
         helper.stamp_provenance(z_fn, **base_tags, **step_tags, variable="zsmax")
         print(f"  {helper.rp_tag(rp)}: wrote hmax + zsmax ({time.time() - t0:.1f}s)")
+
+        if smoothing:
+            h_fn = paths.hmax(rp)
+            h_smooth_fn = paths.hmax_smooth(rp)
+
+            print(
+                f"  {helper.rp_tag(rp)}/{v}: smoothing {h_smooth_fn.name} with smoothing size of 4"
+            )
+
+            helper.smooth_raster_gaussian_blockwise(
+                in_fn=h_fn,
+                out_fn=h_smooth_fn,
+                smooth_size=4,
+                truncate=4,
+            )
+
+            helper.stamp_provenance(
+                out_fn,
+                **base_tags,
+                smoothing="gaussian filter (σ=4)",
+            )
+
 else:
     print("  skipped by toggle")
 
@@ -386,7 +408,10 @@ else:
 print(f"\n{'=' * 60}\nStep 5: disconnected-flooding removal\n{'=' * 60}")
 if run_disconnect:
     for rp in return_periods:
-        h_fn = paths.hmax(rp)
+        if smoothing:
+            h_fn = paths.hmax_smooth(rp)
+        else:
+            h_fn = paths.hmax(rp)
         z_fn = paths.zsmax(rp)
         h_m = paths.hmax_masked(rp)
         z_m = paths.zsmax_masked(rp)
@@ -473,6 +498,12 @@ if run_extras and extra_vars:
                     out_fn=out_fn,
                     smooth_size=smooth_size,
                     truncate=4,
+                )
+
+                helper.stamp_provenance(
+                    out_fn,
+                    **base_tags,
+                    smoothing=f"gaussian filter (σ={smooth_size})",
                 )
 
             print(
@@ -589,7 +620,7 @@ if run_shapefiles:
                 connectivity=8,  # diagonals count as connected
                 min_pixels=30,  # remove speckle < 10 pixels
                 fix_invalid=True,
-                simplify_tolerance=1,  # e.g., set to 1.0 if CRS is projected and you want lighter files
+                simplify_tolerance=2,  # e.g., set to 1.0 if CRS is projected and you want lighter files
                 driver="ESRI Shapefile",
             )
 
@@ -621,7 +652,7 @@ if run_shapefiles:
                 driver="ESRI Shapefile",
                 labels=depth_bins,  # assign labels to the bins; must align with bin edges
                 label_key="ID",
-                simplify_tolerance=1,
+                simplify_tolerance=2,
             )
 
             print(

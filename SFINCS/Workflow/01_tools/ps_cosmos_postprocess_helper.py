@@ -147,6 +147,9 @@ class OutputPaths:
     def hmax(self, rp: float) -> Path:
         return self.raster("hmax", rp)
 
+    def hmax_smooth(self, var: str, rp: float) -> Path:
+        return self.raster_smooth('hmax', rp)
+
     def zsmax(self, rp: float) -> Path:
         return self.raster("zsmax", rp)
 
@@ -1621,6 +1624,7 @@ def bin_depth_with_overlays(
                 dem_nodata = ~np.isfinite(d)
                 out[dem_nodata] = 255
 
+                        
                 # depth bins where DEM is finite and depth > 0
                 wet = (~dem_nodata) & np.isfinite(h) & (h > 0.0)
                 if np.any(wet):
@@ -1629,8 +1633,8 @@ def bin_depth_with_overlays(
                     bins[~wet] = 0
                     bins = np.minimum(bins, n_depth_bins)  # clamp deepest to N
 
-                    # Shift bin codes to 1..N; keep others at 255 (dry)
-                    shifted = np.where(bins >= 1, bins + (depth_code_offset - 0), 255).astype(np.uint8)
+                    # ✅ Shift to 1..N correctly (or just use bins directly)
+                    shifted = np.where(bins >= 1, bins + (depth_code_offset - 1), 255).astype(np.uint8)
                     out[wet] = shifted[wet]
 
                 # flood-prone low-lying: connection == 2, only where still dry (255)
@@ -1814,9 +1818,9 @@ def raster_to_polygons(
             )
 
         # Simplify
-        gdf["geometry"] = gdf.geometry.simplify(
+        gdf["geometry"] = gdf.geometry.simplify_coverage(
             float(simplify_tolerance),
-            preserve_topology=True,
+            simplify_boundary=True,
         )
 
     # --- Optional label join ---
@@ -1950,7 +1954,7 @@ def export_connectivity_regions(
         # Optional simplify to reduce vertex count
         if (simplify_tolerance is not None) and (simplify_tolerance > 0):
             gdf = gdf.set_geometry(
-                gdf.geometry.simplify(simplify_tolerance, preserve_topology=True)
+                gdf.geometry.simplify_coverage(simplify_tolerance, simplify_boundary=True)
             )
         # Assign sequential region IDs per shapefile
         gdf["region_id"] = np.arange(1, len(gdf) + 1, dtype=int)

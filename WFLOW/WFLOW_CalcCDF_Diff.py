@@ -35,6 +35,7 @@ from dask import compute
 # %% Define some functions
 # ===============================================================================
 
+
 @dask.delayed()
 def interp2quant(cdf_vals, cdf_quant, data_vals):
     # Determine CDF based on the pre-calculated ERA5 cdf
@@ -61,14 +62,14 @@ def _station_diff_numpy(cdf_H, cdf_F, cdf_R, data_month_1d):
 
     """
     # Extract arrays for this station id (the caller passes already-filtered arrays)
-    cdf_H_cdf, cdf_H_val = cdf_H['cdf'], cdf_H['values']
-    cdf_F_cdf, cdf_F_val = cdf_F['cdf'], cdf_F['values']
-    cdf_R_cdf, cdf_R_val = cdf_R['cdf'], cdf_R['values']
+    cdf_H_cdf, cdf_H_val = cdf_H["cdf"], cdf_H["values"]
+    cdf_F_cdf, cdf_F_val = cdf_F["cdf"], cdf_F["values"]
+    cdf_R_cdf, cdf_R_val = cdf_R["cdf"], cdf_R["values"]
 
     if cdf_R_val.size == 0:
         # No ERA5 CDF for this station
-        quant_era5 = np.full(data_month_1d.shape[0], np.nan, dtype='float32')
-        diff = np.full(data_month_1d.shape[0], np.nan, dtype='float32')
+        quant_era5 = np.full(data_month_1d.shape[0], np.nan, dtype="float32")
+        diff = np.full(data_month_1d.shape[0], np.nan, dtype="float32")
         return diff, quant_era5
 
     # 1) Map ERA5 observed values -> quantiles in ERA5 CDF [0,1]
@@ -77,23 +78,19 @@ def _station_diff_numpy(cdf_H, cdf_F, cdf_R, data_month_1d):
         cdf_R_val,  # x: values
         cdf_R_cdf,  # y: quant
         left=0.0,
-        right=1.0
-    ).astype('float32')
+        right=1.0,
+    ).astype("float32")
 
     # 2) Map those quantiles to values in Future and Historic CDFs, then diff
     vals_F = np.interp(
-        quant_era5,
-        cdf_F_cdf, cdf_F_val,
-        left=cdf_F_val.min(), right=cdf_F_val.max()
-    ).astype('float32')
+        quant_era5, cdf_F_cdf, cdf_F_val, left=cdf_F_val.min(), right=cdf_F_val.max()
+    ).astype("float32")
 
     vals_H = np.interp(
-        quant_era5,
-        cdf_H_cdf, cdf_H_val,
-        left=cdf_H_val.min(), right=cdf_H_val.max()
-    ).astype('float32')
+        quant_era5, cdf_H_cdf, cdf_H_val, left=cdf_H_val.min(), right=cdf_H_val.max()
+    ).astype("float32")
 
-    diff = (vals_F - vals_H).astype('float32')
+    diff = (vals_F - vals_H).astype("float32")
     return diff, quant_era5
 
 
@@ -111,21 +108,23 @@ def calc_diff_numpy(cdf_H, cdf_F, cdf_R, data_month, var):
     for stat in range(n_stat):
         # Filter CDFs to this station as *NumPy arrays* once
         cdf_H_stat = {
-            'cdf': cdf_H["cdf"].loc[cdf_H["stat"] == stat].to_numpy(),
-            'values': cdf_H["values"].loc[cdf_H["stat"] == stat].to_numpy()
+            "cdf": cdf_H["cdf"].loc[cdf_H["stat"] == stat].to_numpy(),
+            "values": cdf_H["values"].loc[cdf_H["stat"] == stat].to_numpy(),
         }
         cdf_F_stat = {
-            'cdf': cdf_F["cdf"].loc[cdf_F["stat"] == stat].to_numpy(),
-            'values': cdf_F["values"].loc[cdf_F["stat"] == stat].to_numpy()
+            "cdf": cdf_F["cdf"].loc[cdf_F["stat"] == stat].to_numpy(),
+            "values": cdf_F["values"].loc[cdf_F["stat"] == stat].to_numpy(),
         }
         cdf_R_stat = {
-            'cdf': cdf_R["cdf"].loc[cdf_R["stat"] == stat].to_numpy(),
-            'values': cdf_R["values"].loc[cdf_R["stat"] == stat].to_numpy()
+            "cdf": cdf_R["cdf"].loc[cdf_R["stat"] == stat].to_numpy(),
+            "values": cdf_R["values"].loc[cdf_R["stat"] == stat].to_numpy(),
         }
 
         vals_era5 = data_month[var].isel(Q_contour_gauges_contour=stat).values
 
-        task = delayed(_station_diff_numpy)(cdf_H_stat, cdf_F_stat, cdf_R_stat, vals_era5)
+        task = delayed(_station_diff_numpy)(
+            cdf_H_stat, cdf_F_stat, cdf_R_stat, vals_era5
+        )
         tasks.append(task)
 
     # Compute all stations in parallel once
@@ -136,8 +135,8 @@ def calc_diff_numpy(cdf_H, cdf_F, cdf_R, data_month, var):
         diff[:, stat] = diff_stat
         quants[:, stat] = quants_stat
 
-
     return diff, quants
+
 
 def output_yearly(data, dir_out, fname):
     year_out = np.unique(data.time.dt.year)
@@ -156,16 +155,18 @@ def main():
     # ===============================================================================
     # Directory where the WFLOW data resides
     # dir_in = r'D:\DFM'
-    dir_in = r"C:\Users\kai\Documents\KaiDownloads\WFLOW"
-    dir_out = r"C:\Users\kai\Documents\KaiDownloads\WFLOW"
+    dir_in = r"D:\Kai\WFLOW"
+    # dir_in = r"C:\Users\kai\Documents\KaiDownloads\WFLOW"
+    dir_out = r"D:\Kai\WFLOW"
+    # dir_out = r"C:\Users\kai\Documents\KaiDownloads\WFLOW"
 
     # Model to process
     Mod_list = ["CNRM", "EcEarth", "GFDL", "HadGemHH", "HadGemHM", "HadGemHMsst"]
 
     # model grid to process (county)
-    cnty = "snohomish"
+    cnty = "mason"
 
-    n_workers = 10
+    n_workers = 8
 
     # -----------------------------
     # Dask cluster
@@ -194,14 +195,17 @@ def main():
     print("loading ERA5 Data")
 
     if (cnty == "pierce") or (cnty == "king"):
-        dir_runs = "20240801_discharges" 
-    
+        dir_runs = "20240801_discharges"
+
     elif (cnty == "snohomish") or (cnty == "kitsap"):
         dir_runs = "11_20_2025_Discharges_SnohomishKitsap"
-    
+
+    elif cnty == "mason":
+        dir_runs = None
+
     files = os.path.join(
         dir_in,
-        dir_runs,
+   #     dir_runs,
         cnty,
         "era5_3hourly",
         "output_scalar.nc",
@@ -230,7 +234,7 @@ def main():
             with open(
                 os.path.join(
                     dir_in,
-                    dir_runs,
+#                    dir_runs,
                     cnty,
                     f"cmip6_{Mod}_historic_bc",
                     "CDFmonthly_{0:02d}.pkl".format(month),
@@ -243,7 +247,7 @@ def main():
             with open(
                 os.path.join(
                     dir_in,
-                    dir_runs,
+#                    dir_runs,
                     cnty,
                     f"cmip6_{Mod}_future_bc",
                     "CDFmonthly_{0:02d}.pkl".format(month),
@@ -256,7 +260,7 @@ def main():
             with open(
                 os.path.join(
                     dir_in,
-                    dir_runs,
+#                    dir_runs,
                     cnty,
                     "era5_3hourly",
                     "CDFmonthly_{0:02d}.pkl".format(month),
@@ -270,10 +274,10 @@ def main():
             ind_month = ds_era5.time.dt.month.isin(month)
             data_month = ds_era5.isel(time=ind_month)
 
-            
             # Calculate the difference between the historic and future.
-            diff, quants = calc_diff_numpy(cdf_cmipH, cdf_cmipF, cdf_cmipR, data_month, "Q_contour")
-
+            diff, quants = calc_diff_numpy(
+                cdf_cmipH, cdf_cmipF, cdf_cmipR, data_month, "Q_contour"
+            )
 
             # Add this month chunk into the full set
             diff_full[ind_month, :] = diff
@@ -334,17 +338,15 @@ def main():
 
     output_yearly(
         ds_full,
-        os.path.join(
-            dir_out, dir_runs, cnty, "cdf_diff"
-        ),
+        os.path.join(dir_out, cnty, "cdf_diff"),
         "WFLOW_ERA5Diff_{year}.nc",
     )
 
-        
     client.close()
     cluster.close()
 
 
-
 if __name__ == "__main__":
     main()
+
+# %%

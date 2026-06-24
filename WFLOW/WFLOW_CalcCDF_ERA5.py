@@ -127,9 +127,9 @@ def main():
     # -----------------------------
     # User inputs
     # -----------------------------
-    dir_in = r'D:\wflow\11_20_2025_Discharges_SnohomishKitsap'
-    dir_out = r'D:\wflow\11_20_2025_Discharges_SnohomishKitsap'
-    cnty = 'snohomish'
+    dir_in = r'D:\Kai\WFLOW'
+    dir_out = r'D:\Kai\WFLOW'
+    cnty = 'mason'
     var = 'Q_contour'
     station_dim = 'Q_contour_gauges_contour'  # adjust if your variable uses a different name
     n_workers = 6
