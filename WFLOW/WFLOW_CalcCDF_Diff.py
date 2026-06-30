@@ -164,7 +164,7 @@ def main():
     Mod_list = ["CNRM", "EcEarth", "GFDL", "HadGemHH", "HadGemHM", "HadGemHMsst"]
 
     # model grid to process (county)
-    cnty = "mason"
+    cnty = "thurston"
 
     n_workers = 8
 
@@ -220,6 +220,11 @@ def main():
     # ===============================================================================
     ds_save1 = [i for i in range(len(Mod_list))]
     ds_save2 = [i for i in range(len(Mod_list))]
+
+    dir_out_full =   os.path.join(dir_out, cnty, "cdf_diff")
+    os.makedirs(dir_out_full, exist_ok=True)
+
+
     for cnt, Mod in enumerate(Mod_list):
         print(f"Processing CMIP6 Difference for {Mod}")
 
@@ -338,7 +343,7 @@ def main():
 
     output_yearly(
         ds_full,
-        os.path.join(dir_out, cnty, "cdf_diff"),
+        dir_out_full,
         "WFLOW_ERA5Diff_{year}.nc",
     )
 

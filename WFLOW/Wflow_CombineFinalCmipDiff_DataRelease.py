@@ -20,7 +20,6 @@ import os
 from glob import glob
 import numpy as np
 import xarray as xr
-import dask.distributed
 from datetime import datetime
 import pandas as pd
 import re
@@ -33,12 +32,10 @@ from dask.distributed import Client, LocalCluster
 # ===============================================================================
 # Directory where the DFM data resides
 # dir_in = r'D:\DFM'
-dir_in = (
-    r"C:\Users\kai\Documents\KaiDownloads\WFLOW\11_20_2025_Discharges_SnohomishKitsap"
-)
+dir_in = r"D:\Kai\WFLOW"
 
 # model grid to process (county)
-cnty = "kitsap"
+cnty = "thurston"
 
 # ===============================================================================
 # %% Define some functions
@@ -277,26 +274,26 @@ def main():
         data=lat,  # enter data here
         dims=["station"],
         coords={"station": ds_diff["station"]},
-        attrs= {
+        attrs={
             "standard_name": "latitude",
             "long_name": "y-coordinate of station",
             "projection": "WGS 84",
             "epsg": "4326",
             "units": "degrees_north",
-            },
+        },
     )
 
     ds_diff["lon"] = xr.DataArray(
         data=lon,  # enter data here
         dims=["station"],
         coords={"station": ds_diff["station"]},
-        attrs= {
+        attrs={
             "standard_name": "longitude",
             "long_name": "x-coordinate of station",
             "projection": "WGS 84",
             "epsg": "4326",
             "units": "degree_east",
-            },
+        },
     )
 
     ds_diff["contour"] = xr.DataArray(
@@ -326,7 +323,6 @@ def main():
         "precision": "Data encoded as integer with 4 significant digits",
     }
 
-    
     ds_era5["Q_CmipDiff"].attrs = {
         "long_name": "CMIP6 difference in Discharge (Q)",
         "units": "m3/s",
@@ -345,17 +341,19 @@ def main():
     }
 
     # SEt some attributes to the varialbes
-    ds_era5["cmip6"].attrs = {"long_name": "Cmip6 Model (HighResMIP)",
+    ds_era5["cmip6"].attrs = {
+        "long_name": "Cmip6 Model (HighResMIP)",
         "description": "Source model for projected wave height difference",
     }
-
 
     ds_era5["station"].attrs = {"long_name": "station name"}
 
     # Global Attributes
     ds_era5.attrs["processing_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ds_era5.attrs.pop("DataSource", None)
-    ds_era5.attrs["author"] = "Wflow team (Joost Buitink & Brendan Dalmijn, Deltares) and USGS (Kai Parker, PCMSC)"
+    ds_era5.attrs["author"] = (
+        "Wflow team (Joost Buitink & Brendan Dalmijn, Deltares) and USGS (Kai Parker, PCMSC)"
+    )
     ds_era5.attrs["description"] = (
         "This dataset contains modelled Discharge (Q) for the reanalysis period. Modelled changes to the reanalysis timeseries (as predicted by CMIP6) are also included. Output is for stations in the Salish Sea"
     )
@@ -391,7 +389,7 @@ def main():
                     f"WARNING: {v} has time slices with >95% NaNs. Indices:",
                     np.where(bad.values)[0][:10],
                 )
-    
+
     # ===============================================================================
     #  Output
     # ===============================================================================
@@ -424,9 +422,7 @@ def main():
 
     # Output the dataset for this county
     ds_era5.to_netcdf(
-        os.path.join(
-            dir_out, f"Reanalysis_and_Projected_WFLOWdischarges_{cnty}.nc"
-        ),
+        os.path.join(dir_out, f"Reanalysis_and_Projected_WFLOWdischarges_{cnty}.nc"),
         engine="netcdf4",
         encoding={
             "Q": int_encoding,
@@ -445,7 +441,7 @@ def main():
     client.close()
     cluster.close()
 
-    print('Done! ')
+    print("Done! ")
 
 
 if __name__ == "__main__":

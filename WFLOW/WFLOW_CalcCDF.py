@@ -120,7 +120,7 @@ def main():
     dir_in = r"D:\Kai\WFLOW"
     dir_out = r"D:\Kai\WFLOW"
 
-    cnty = "mason"
+    cnty = "whatcom"
     Mod_list = ["CNRM", "EcEarth", "GFDL", "HadGemHH", "HadGemHM", "HadGemHMsst"]
     Per = "historic"
 

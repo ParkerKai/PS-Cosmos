@@ -4,7 +4,7 @@ Created on Mon May  6 14:29:35 2024
 
 This script calculates the cdf  for each model.
 CDF is calculated monthly
-This can then be applied to the reanalysis period.  
+This can then be applied to the reanalysis period.
 
 For WFLOW model runs
 
@@ -32,12 +32,14 @@ import dask
 # Functions
 # ------------------------------------------------------------------------------
 
+
 def _ensure_numpy(arr):
     """Return a NumPy array from a NumPy or Dask array without loading early."""
     # If this is a Dask collection, compute here (inside the worker)
     if hasattr(arr, "compute"):
         arr = arr.compute()
     return np.asarray(arr)
+
 
 @dask.delayed  # <- no parentheses
 def emp_cdf_xr(values, stat):
@@ -58,9 +60,11 @@ def emp_cdf_xr(values, stat):
     try:
         import scipy
         from scipy import stats
+
         # sanity check version
         try:
             from packaging.version import parse as V
+
             if V(scipy.__version__) < V("1.11"):
                 raise ImportError("scipy.stats.ecdf requires SciPy >= 1.11")
         except Exception:
@@ -79,6 +83,7 @@ def emp_cdf_xr(values, stat):
     except Exception:
         # Fallback: statsmodels ECDF for older SciPy environments
         from statsmodels.distributions.empirical_distribution import ECDF
+
         ecdf = ECDF(data)
         # ECDF exposes step locations via ecdf.x and ECDF values via ecdf.y
         df = pd.DataFrame(
@@ -89,6 +94,7 @@ def emp_cdf_xr(values, stat):
             }
         )
         return df
+
 
 def emp_cdf(ds, var, station_dim):
     """
@@ -111,6 +117,7 @@ def emp_cdf(ds, var, station_dim):
     # Compute once (returns the concrete DataFrame)
     return dask.compute(delayed_concat)[0]
 
+
 def monthly_CDF(ds, var, station_dim, month):
     """
     Filter dataset by calendar month and compute ECDFs.
@@ -119,19 +126,23 @@ def monthly_CDF(ds, var, station_dim, month):
     ds_month = ds.sel(time=ds.time.dt.month == month)
     return emp_cdf(ds_month, var, station_dim)
 
+
 # ------------------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------------------
+
 
 def main():
     # -----------------------------
     # User inputs
     # -----------------------------
-    dir_in = r'D:\Kai\WFLOW'
-    dir_out = r'D:\Kai\WFLOW'
-    cnty = 'mason'
-    var = 'Q_contour'
-    station_dim = 'Q_contour_gauges_contour'  # adjust if your variable uses a different name
+    dir_in = r"D:\Kai\WFLOW"
+    dir_out = r"D:\Kai\WFLOW"
+    cnty = "whatcom"
+    var = "Q_contour"
+    station_dim = (
+        "Q_contour_gauges_contour"  # adjust if your variable uses a different name
+    )
     n_workers = 6
 
     # -----------------------------
@@ -156,22 +167,25 @@ def main():
     # -----------------------------
     # Load data (single file)
     # -----------------------------
-    fn = os.path.join(dir_in, cnty, 'era5_3hourly', 'output_scalar.nc')
+    fn = os.path.join(dir_in, cnty, "era5_3hourly", "output_scalar.nc")
 
     # Use open_dataset for a single file; give chunks to benefit from Dask laziness
-    ds = xr.open_dataset(fn, engine='h5netcdf', chunks={'time': 1000})
+    ds = xr.open_dataset(fn, engine="h5netcdf", chunks={"time": 1000})
 
     # -----------------------------
     # Compute monthly ECDFs
     # -----------------------------
-    os.makedirs(os.path.join(dir_out, cnty, 'era5_3hourly'), exist_ok=True)
+    os.makedirs(os.path.join(dir_out, cnty, "era5_3hourly"), exist_ok=True)
 
     for month in range(1, 13):
-        print(f'Processing Month: {month:02d}')
+        print(f"Processing Month: {month:02d}")
         cdf_month = monthly_CDF(ds, var, station_dim, month)
-        out_fn = os.path.join(dir_out, cnty, 'era5_3hourly', f'CDFmonthly_{month:02d}.pkl')
+        out_fn = os.path.join(
+            dir_out, cnty, "era5_3hourly", f"CDFmonthly_{month:02d}.pkl"
+        )
         cdf_month.to_pickle(out_fn)
-        print(f'Wrote: {out_fn}')
+        print(f"Wrote: {out_fn}")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

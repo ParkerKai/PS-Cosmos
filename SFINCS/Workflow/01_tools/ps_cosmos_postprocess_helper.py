@@ -32,7 +32,7 @@ import xarray as xr
 from scipy.stats import genextreme
 from scipy.ndimage import gaussian_filter
 import geopandas as gpd
-from shapely.geometry import shape
+from shapely.geometry import shape, Polygon, MultiPolygon
 from rasterio.features import shapes, sieve
 from rasterio.windows import Window
 from pyproj import CRS
@@ -125,7 +125,7 @@ class OutputPaths:
             self.output_dir
             / f"{name}_{rp_tag(rp)}_{self.domain_stem}_{self.provenance_tag}{self.raster_ext}"
         )
-    
+
     def raster_smooth(self, name: str, rp: float) -> Path:
         return (
             self.output_dir
@@ -147,8 +147,8 @@ class OutputPaths:
     def hmax(self, rp: float) -> Path:
         return self.raster("hmax", rp)
 
-    def hmax_smooth(self, var: str, rp: float) -> Path:
-        return self.raster_smooth('hmax', rp)
+    def hmax_smooth(self, rp: float) -> Path:
+        return self.raster_smooth("hmax", rp)
 
     def zsmax(self, rp: float) -> Path:
         return self.raster("zsmax", rp)
@@ -164,7 +164,7 @@ class OutputPaths:
 
     def extra(self, var: str, rp: float) -> Path:
         return self.raster(var, rp)
-    
+
     def extra_smooth(self, var: str, rp: float) -> Path:
         return self.raster_smooth(var, rp)
 
@@ -192,8 +192,6 @@ class OutputPaths:
 
     def extent_max_shapefile(self, rp: float) -> Path:
         return self.vector("extent_max", rp)
-
-
 
     # --- Utilities ---
     def ensure_dirs(self) -> None:
@@ -1144,7 +1142,9 @@ def smooth_raster_gaussian_blockwise(
     *,
     preserve_input_nodata: bool = False,
     out_dtype: str = "float32",
-    out_blocksize: Optional[int] = None,  # e.g., 256 or 512; if None, derive from source or fallback
+    out_blocksize: Optional[
+        int
+    ] = None,  # e.g., 256 or 512; if None, derive from source or fallback
     mode: str = "reflect",  # scipy.ndimage gaussian_filter boundary mode
 ) -> None:
     """
@@ -1196,7 +1196,9 @@ def smooth_raster_gaussian_blockwise(
     out_fn = Path(out_fn)
 
     if in_fn.resolve() == out_fn.resolve():
-        raise ValueError("out_fn must be different from in_fn; in‑place writing has been removed.")
+        raise ValueError(
+            "out_fn must be different from in_fn; in‑place writing has been removed."
+        )
 
     if smooth_size < 0:
         raise ValueError("smooth_size (sigma) must be >= 0")
@@ -1210,7 +1212,9 @@ def smooth_raster_gaussian_blockwise(
         out_fn.parent.mkdir(parents=True, exist_ok=True)
         with rasterio.open(in_fn) as src:
             if src.count != 1:
-                raise ValueError(f"Expected a single-band raster; found {src.count} bands.")
+                raise ValueError(
+                    f"Expected a single-band raster; found {src.count} bands."
+                )
             meta = src.meta.copy()
 
             # Decide nodata metadata policy
@@ -1222,8 +1226,11 @@ def smooth_raster_gaussian_blockwise(
             band = src.read(1).astype(out_np_dtype, copy=False)
 
             # If not preserving nodata and source had a finite nodata, convert those cells to NaN
-            if (not preserve_input_nodata and
-                src_nodata is not None and not (isinstance(src_nodata, float) and np.isnan(src_nodata))):
+            if (
+                not preserve_input_nodata
+                and src_nodata is not None
+                and not (isinstance(src_nodata, float) and np.isnan(src_nodata))
+            ):
                 band = band.copy()
                 band[band == src_nodata] = np.nan
 
@@ -1235,7 +1242,9 @@ def smooth_raster_gaussian_blockwise(
                     smoothing_truncate=str(truncate),
                     smoothing_halo=str(0),
                     input_nodata=str(src_nodata),
-                    output_nodata=("None" if out_nodata_tag is None else str(out_nodata_tag)),
+                    output_nodata=(
+                        "None" if out_nodata_tag is None else str(out_nodata_tag)
+                    ),
                     note="sigma=0 → copy",
                     mode=mode,
                 )
@@ -1279,7 +1288,7 @@ def smooth_raster_gaussian_blockwise(
             blockysize=block_h,
             compress="deflate",
             predictor=3,  # better for float data
-            zlevel=6,     # reasonable compression level
+            zlevel=6,  # reasonable compression level
             BIGTIFF="IF_NEEDED",
         )
 
@@ -1302,7 +1311,9 @@ def smooth_raster_gaussian_blockwise(
                 pad_block = src.read(1, window=pad_win).astype(out_np_dtype, copy=False)
 
                 # Build invalid mask (NaN or source nodata)
-                if src_nodata is not None and not (isinstance(src_nodata, float) and np.isnan(src_nodata)):
+                if src_nodata is not None and not (
+                    isinstance(src_nodata, float) and np.isnan(src_nodata)
+                ):
                     ind_nan = np.isnan(pad_block) | (pad_block == src_nodata)
                 else:
                     ind_nan = np.isnan(pad_block)
@@ -1325,10 +1336,16 @@ def smooth_raster_gaussian_blockwise(
                 mask_valid_weight = WW > eps
 
                 # Compute filtered values where we have any valid neighbor support
-                out_pad[mask_valid_weight] = VV[mask_valid_weight] / WW[mask_valid_weight]
+                out_pad[mask_valid_weight] = (
+                    VV[mask_valid_weight] / WW[mask_valid_weight]
+                )
 
                 # Choose data sentinel: use src nodata if present and preserved; else NaN
-                if preserve_input_nodata and src_nodata is not None and not (isinstance(src_nodata, float) and np.isnan(src_nodata)):
+                if (
+                    preserve_input_nodata
+                    and src_nodata is not None
+                    and not (isinstance(src_nodata, float) and np.isnan(src_nodata))
+                ):
                     out_nodata_data = src_nodata
                 else:
                     out_nodata_data = np.nan
@@ -1353,13 +1370,14 @@ def smooth_raster_gaussian_blockwise(
                 smoothing_truncate=str(truncate),
                 smoothing_halo=str(halo),
                 input_nodata=str(src_nodata),
-                output_nodata=("None" if out_nodata_tag is None else str(out_nodata_tag)),
+                output_nodata=(
+                    "None" if out_nodata_tag is None else str(out_nodata_tag)
+                ),
                 note="Blockwise nodata/NaN‑preserving Gaussian smoothing with halo",
                 blockxsize=str(block_w),
                 blockysize=str(block_h),
                 mode=mode,
             )
-
 
 
 # =============================================================================
@@ -1482,7 +1500,9 @@ def bin_raster(
 
                 # NEW: bins whose corresponding ID == 0 -> nodata
                 if np.any(ids == 0):
-                    zero_bin_indices = np.nonzero(ids == 0)[0] + 1  # bin indices are 1..N
+                    zero_bin_indices = (
+                        np.nonzero(ids == 0)[0] + 1
+                    )  # bin indices are 1..N
                     bins[np.isin(bins, zero_bin_indices)] = 255
 
                 dst.write(bins, 1, window=window)
@@ -1511,7 +1531,6 @@ def bin_raster(
                 tags[f"bin_{idx}_label"] = str(labels[i])
                 tags[f"bin_{idx}_min"] = _fmt(float(vmin[i]))
                 tags[f"bin_{idx}_max"] = _fmt(float(vmax[i]))
-
 
 
 def bin_depth_with_overlays(
@@ -1559,7 +1578,9 @@ def bin_depth_with_overlays(
     dmax = np.asarray(depth_bins["D_Max"], dtype=np.float32)
 
     n_depth_bins = dmin.size
-    if not (len(ids) == len(cats) == len(lbl_ft) == len(lbl_m) == dmin.size == dmax.size):
+    if not (
+        len(ids) == len(cats) == len(lbl_ft) == len(lbl_m) == dmin.size == dmax.size
+    ):
         raise ValueError(
             "All depth_bins arrays/lists must have the same length: "
             f"ID={len(ids)}, Category={len(cats)}, Depth_Label_ft={len(lbl_ft)}, "
@@ -1581,29 +1602,35 @@ def bin_depth_with_overlays(
         )
 
     # Open sources and verify grid alignment
-    with rasterio.open(hmax_masked_fn) as hsrc, \
-         rasterio.open(connection_fn) as csrc, \
-         rasterio.open(dem_fn) as dsrc:
+    with (
+        rasterio.open(hmax_masked_fn) as hsrc,
+        rasterio.open(connection_fn) as csrc,
+        rasterio.open(dem_fn) as dsrc,
+    ):
 
         def _same_grid(a, b) -> bool:
             return (
-                a.width == b.width and
-                a.height == b.height and
-                a.transform == b.transform and
-                a.crs == b.crs
+                a.width == b.width
+                and a.height == b.height
+                and a.transform == b.transform
+                and a.crs == b.crs
             )
 
         if not _same_grid(hsrc, csrc):
-            raise ValueError("Grid mismatch: 'connection_fn' does not match 'hmax_masked_fn' (width/height/transform/crs).")
+            raise ValueError(
+                "Grid mismatch: 'connection_fn' does not match 'hmax_masked_fn' (width/height/transform/crs)."
+            )
         if not _same_grid(hsrc, dsrc):
-            raise ValueError("Grid mismatch: 'dem_fn' does not match 'hmax_masked_fn' (width/height/transform/crs).")
+            raise ValueError(
+                "Grid mismatch: 'dem_fn' does not match 'hmax_masked_fn' (width/height/transform/crs)."
+            )
 
         # Prepare output metadata from the hmax source
         meta = hsrc.meta.copy()
         meta.update(
             count=1,
             dtype="uint8",
-            nodata=255,       # <-- nodata is 255 (same as 'dry')
+            nodata=255,  # <-- nodata is 255 (same as 'dry')
             tiled=True,
             blockxsize=256,
             blockysize=256,
@@ -1624,7 +1651,6 @@ def bin_depth_with_overlays(
                 dem_nodata = ~np.isfinite(d)
                 out[dem_nodata] = 255
 
-                        
                 # depth bins where DEM is finite and depth > 0
                 wet = (~dem_nodata) & np.isfinite(h) & (h > 0.0)
                 if np.any(wet):
@@ -1634,7 +1660,9 @@ def bin_depth_with_overlays(
                     bins = np.minimum(bins, n_depth_bins)  # clamp deepest to N
 
                     # ✅ Shift to 1..N correctly (or just use bins directly)
-                    shifted = np.where(bins >= 1, bins + (depth_code_offset - 1), 255).astype(np.uint8)
+                    shifted = np.where(
+                        bins >= 1, bins + (depth_code_offset - 1), 255
+                    ).astype(np.uint8)
                     out[wet] = shifted[wet]
 
                 # flood-prone low-lying: connection == 2, only where still dry (255)
@@ -1659,8 +1687,8 @@ def bin_depth_with_overlays(
                 "floodprone_code": str(floodprone_code),
                 f"code_{floodprone_code}_label": floodprone_label,
                 # Dry / nodata
-                "code_255_label": "dry",   # presentation label (but masked as nodata by many viewers)
-                "nodata_label": "dry",     # explicitly state nodata is also 255/dry
+                "code_255_label": "dry",  # presentation label (but masked as nodata by many viewers)
+                "nodata_label": "dry",  # explicitly state nodata is also 255/dry
             }
 
             # Per-code details for 1..N
@@ -1681,6 +1709,7 @@ def bin_depth_with_overlays(
 # =============================================================================
 # SECTION 5: Shapefile
 # =============================================================================
+
 
 def raster_to_polygons(
     raster_file: str,
@@ -1746,9 +1775,9 @@ def raster_to_polygons(
         * For Shapefile ('ESRI Shapefile'), remember 10-char field name limits and
           stricter type constraints; prefer GeoPackage ('GPKG') for richer schemas.
     """
+
     if connectivity not in (4, 8):
         raise ValueError(f"connectivity must be 4 or 8, got {connectivity}")
-
     if min_pixels is not None and min_pixels <= 0:
         raise ValueError(f"min_pixels must be a positive integer, got {min_pixels}")
 
@@ -1759,36 +1788,40 @@ def raster_to_polygons(
         crs = src.crs
         nodata = src.nodata
 
-        # Enforce integer dtype
+        # Enforce integer dtype for categorical polygonization
         if not np.issubdtype(band.dtype, np.integer):
             raise TypeError(
                 f"Input raster band must be integer dtype; got {band.dtype}. "
                 "Please supply a categorical integer raster."
             )
 
-        # Build mask to exclude NoData (if defined)
-        if nodata is None:
-            mask = None
-        else:
-            mask = band != nodata
+        # Prefer GDAL's valid data mask if available; fallback to != nodata
+        # Rasterio masks: non-zero == valid pixels
+        mask = None
+        if nodata is not None:
+            try:
+                m = src.read_masks(1)
+                mask = m.astype(bool)
+            except Exception:
+                mask = band != nodata
 
-        # Optional cleanup via sieve (works only on integer arrays)
+        # Optional cleanup via sieve (integer arrays only)
         if min_pixels is not None:
             band = sieve(
-                band.astype(np.int32),  # ensure a sensible int type for sieve
+                band.astype(np.int32),
                 size=int(min_pixels),
                 connectivity=connectivity,
                 mask=mask,
             )
 
         # Polygonize
-        geom_val_iter = shapes(
-            band, mask=mask, transform=transform, connectivity=connectivity
-        )
-
         feats = []
-        for geom, value in geom_val_iter:
-            # value is integer (numpy scalar); cast to Python int for GeoJSON-friendly types
+        for geom, value in shapes(
+            band,
+            mask=mask,
+            transform=transform,
+            connectivity=connectivity,
+        ):
             if value is None:
                 continue
             v = value.item() if hasattr(value, "item") else value
@@ -1800,33 +1833,65 @@ def raster_to_polygons(
     if not gdf.empty:
         gdf = gdf[~gdf.geometry.is_empty].reset_index(drop=True)
 
-    # ---Optional dissolve by ID ----
+    # --- (1) Feature-level sieve: drop tiny polygons by CRS-area equivalent of min_pixels ---
+    # Pixel area from affine transform: |a*e - b*d| (robust to rotation/shear)
+    # min_area = min_pixels * pixel_area
+    if not gdf.empty and min_pixels is not None:
+        a = transform.a
+        b = transform.b
+        d = transform.d
+        e = transform.e
+        pixel_area = abs(a * e - b * d)
+        min_area = float(min_pixels) * pixel_area
+        gdf = gdf.loc[gdf.geometry.area >= min_area].reset_index(drop=True)
+
+    # --- (2) Fill (remove) small holes inside polygons ---
+    if min_pixels is not None and not gdf.empty:
+
+        def _fill_small_holes(geom, min_area):
+            if geom.is_empty:
+                return geom
+            if geom.geom_type == "Polygon":
+                kept = []
+                for ring in geom.interiors:
+                    hole_area = Polygon(ring).area
+                    if hole_area >= min_area:
+                        kept.append(ring.coords[:])
+                return Polygon(geom.exterior.coords[:], kept)
+            elif geom.geom_type == "MultiPolygon":
+                parts = [_fill_small_holes(p, min_area) for p in geom.geoms]
+                return MultiPolygon(parts)
+            else:
+                return geom
+
+        gdf["geometry"] = gdf.geometry.apply(lambda g: _fill_small_holes(g, min_area))
+
+    # --- (3) Optional dissolve by ID ----
     if dissolve and not gdf.empty:
         gdf = gdf.dissolve(by="ID", as_index=False)
 
-    # --- Optional geometry simplification ---
-   
+    # --- (4) Optional coverage simplification ---
     if simplify_tolerance is not None and not gdf.empty:
-        crs_type = _crs_kind(gdf.crs)
-        if crs_type != "projected":
-            # Hard guardrail: raise
+        # Tolerance is in CRS units; disallow geographic (degrees) by default
+        if getattr(gdf.crs, "is_projected", False) is not True:
             raise ValueError(
-                f"Simplification tolerance is interpreted in CRS units, but the layer CRS is "
-                f"'{crs_type}'. Please reproject to a projected CRS (e.g., meters/feet) before "
-                f"simplifying, or set enforce_projected_for_simplify=False if you intend to "
-                f"simplify in degrees."
+                "Simplification tolerance is interpreted in CRS units, but layer CRS is geographic. "
+                "Reproject to a projected CRS (e.g., EPSG:3857 or a local UTM/State Plane) before simplifying."
+            )
+        # Use simplify_coverage when available; otherwise fallback to per-geometry simplify
+        if hasattr(gdf.geometry, "simplify_coverage"):
+            gdf["geometry"] = gdf.geometry.simplify_coverage(
+                float(simplify_tolerance), simplify_boundary=True
+            )
+        else:
+            gdf["geometry"] = gdf.geometry.simplify(
+                float(simplify_tolerance), preserve_topology=True
             )
 
-        # Simplify
-        gdf["geometry"] = gdf.geometry.simplify_coverage(
-            float(simplify_tolerance),
-            simplify_boundary=True,
-        )
-
-    # --- Optional label join ---
+    # --- (5) Optional label join ---
     if labels is not None and not gdf.empty:
         if isinstance(labels, Mapping):
-            labels_df = pd.DataFrame(labels)  # convert dict to DataFrame
+            labels_df = pd.DataFrame(labels)
         elif isinstance(labels, pd.DataFrame):
             labels_df = labels.copy()
         else:
@@ -1835,24 +1900,18 @@ def raster_to_polygons(
         if label_key not in labels_df.columns:
             raise KeyError(f"labels is missing the key column '{label_key}'.")
 
-        # Deduplicate label keys (keep first occurrence)
-        labels_df = labels_df.drop_duplicates(subset=[label_key], keep="first")
+        labels_df = labels_df.drop_duplicates(subset=[label_key], keep="first").copy()
+        # Use nullable Int64 to avoid overflow from downcasting
+        labels_df[label_key] = pd.to_numeric(labels_df[label_key]).astype("Int64")
+        gdf["ID"] = pd.to_numeric(gdf["ID"]).astype("Int64")
 
-        # Ensure key columns are integer and consistent
-        labels_df[label_key] = pd.to_numeric(labels_df[label_key], downcast="integer")
-        gdf["ID"] = pd.to_numeric(gdf["ID"], downcast="integer")
-
-        # Replace +/-inf with NaN/None to keep writers happy
+        # Replace +/-inf with NaN in numeric label columns
         num_cols = labels_df.select_dtypes(include=[np.number]).columns.tolist()
         if num_cols:
             labels_df[num_cols] = labels_df[num_cols].replace([np.inf, -np.inf], np.nan)
 
-        # Perform left join on ID -> label_key
         gdf = gdf.merge(labels_df, left_on="ID", right_on=label_key, how="left")
-
-        # If label_key != 'ID', you can drop it post-merge if you prefer:
         if label_key != "ID":
-            # Keep 'ID' as the canonical code; drop the label key column to avoid duplication
             gdf = gdf.drop(columns=[label_key])
 
     # Write to disk
@@ -1954,7 +2013,9 @@ def export_connectivity_regions(
         # Optional simplify to reduce vertex count
         if (simplify_tolerance is not None) and (simplify_tolerance > 0):
             gdf = gdf.set_geometry(
-                gdf.geometry.simplify_coverage(simplify_tolerance, simplify_boundary=True)
+                gdf.geometry.simplify_coverage(
+                    simplify_tolerance, simplify_boundary=True
+                )
             )
         # Assign sequential region IDs per shapefile
         gdf["region_id"] = np.arange(1, len(gdf) + 1, dtype=int)

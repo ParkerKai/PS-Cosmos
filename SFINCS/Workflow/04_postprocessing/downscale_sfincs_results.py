@@ -115,8 +115,8 @@ smooth_size = 22  # sigma for gaussian filter
 depth_bins = {
     "ID": np.array([1, 2, 3, 4, 5], dtype="int16"),
     "Category": ["Low", "Medium", "High", "VeryHigh", "Extreme"],
-    "Depth_Label_ft": ["<0.5", "0.5-1.0", "1.0-3.0", "3.0-5.0", ">5.0"],
-    "Depth_Label_m": ["<0.15", "0.15-0.3", "0.3-0.9", "0.9-1.5", ">1.5"],
+    "Label_ft": ["<0.5", "0.5-1.0", "1.0-3.0", "3.0-5.0", ">5.0"],
+    "Label_m": ["<0.15", "0.15-0.3", "0.3-0.9", "0.9-1.5", ">1.5"],
     "D_Min": np.array([-np.inf, 0.1524, 0.3048, 0.9144, 1.524]),
     "D_Max": np.array([0.1524, 0.3048, 0.9144, 1.524, np.inf]),
 }
@@ -382,7 +382,7 @@ if run_downscale:
             h_smooth_fn = paths.hmax_smooth(rp)
 
             print(
-                f"  {helper.rp_tag(rp)}/{v}: smoothing {h_smooth_fn.name} with smoothing size of 4"
+                f"  {helper.rp_tag(rp)}: smoothing {h_smooth_fn.name} with smoothing size of 4"
             )
 
             helper.smooth_raster_gaussian_blockwise(
@@ -393,7 +393,7 @@ if run_downscale:
             )
 
             helper.stamp_provenance(
-                out_fn,
+                h_smooth_fn,
                 **base_tags,
                 smoothing="gaussian filter (σ=4)",
             )
@@ -639,6 +639,17 @@ if run_shapefiles:
                 f"  skip {helper.rp_tag(rp)}/depth_bins: depth bins raster not available"
             )
             continue
+
+
+        # Add lables for lowlying
+        depth_bins["ID"]  = np.append(depth_bins["ID"], np.int16(6))   # keep dtype=int16
+        depth_bins["Category"].append("LowLying")
+        depth_bins["Label_ft"].append("N/A")
+        depth_bins["Label_m"].append("N/A")
+        depth_bins["D_Min"] = np.append(depth_bins["D_Min"], np.nan)     # float array, NaN ok
+        depth_bins["D_Max"] = np.append(depth_bins["D_Max"], np.nan)     # float array, NaN ok
+
+
         if dbins_shp_fn.exists():
             print(f"  skip {helper.rp_tag(rp)}/depth_bins: exists")
         else:
@@ -650,7 +661,7 @@ if run_shapefiles:
                 min_pixels=30,  # drop patches < 50 pixels
                 dissolve=True,  # merge polygons by class ID
                 driver="ESRI Shapefile",
-                labels=depth_bins,  # assign labels to the bins; must align with bin edges
+                labels=depth_bins,  # assign labels to the bins
                 label_key="ID",
                 simplify_tolerance=2,
             )
