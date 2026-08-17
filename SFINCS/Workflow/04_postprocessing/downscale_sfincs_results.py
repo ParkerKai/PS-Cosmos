@@ -59,7 +59,7 @@ import ps_cosmos_postprocess_helper as helper
 # --- inputs ---
 # Reference SFINCS model (provides the quadtree grid + boundary points).
 # For multi-year aggregation, point `sfincs_dirs` at each water-year run dir.
-sfincs_root = Path(r"D:\Kai\DataDownloads\Snohomish_20260514")
+sfincs_root = Path(r"D:\Kai\SFINCS\Snohomish_slr000")
 bnd_file = os.path.join(sfincs_root, "sfincs.bnd")
 
 # DEM + index COG
@@ -151,7 +151,7 @@ sfincs_dirs = sorted(
     p
     for p in sfincs_root.iterdir()
     if p.is_dir()
-    and p.name.isdigit()
+ #   and p.name.isdigit()
     and len(p.name) == 4
     and (p / "sfincs_map.nc").exists()
 )

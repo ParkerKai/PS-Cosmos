@@ -120,16 +120,16 @@ def main():
     dir_in = r"D:\Kai\WFLOW"
     dir_out = r"D:\Kai\WFLOW"
 
-    cnty = "whatcom"
+    cnty = "pierce"
     Mod_list = ["CNRM", "EcEarth", "GFDL", "HadGemHH", "HadGemHM", "HadGemHMsst"]
-    Per = "historic"
+    Per = "future"  # "historic" or "future"
 
     var = "Q_contour"  # variable to process
     station_dim = "Q_contour_gauges_contour"  # station dimension name in the file
     save_as_parquet = False  # True for Parquet; False keeps Pickle
 
     # Number of workers
-    n = 8
+    n = 6
 
     # -----------------------------
     # Dask cluster

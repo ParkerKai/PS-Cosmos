@@ -1565,15 +1565,15 @@ def bin_depth_with_overlays(
     out_fn.parent.mkdir(parents=True, exist_ok=True)
 
     # --- Extract and validate depth_bins ---
-    required = ("ID", "Category", "Depth_Label_ft", "Depth_Label_m", "D_Min", "D_Max")
+    required = ("ID", "Category", "Label_ft", "Label_m", "D_Min", "D_Max")
     missing = [k for k in required if k not in depth_bins]
     if missing:
         raise ValueError(f"depth_bins missing required keys: {missing}")
 
     ids = np.asarray(depth_bins["ID"])
     cats = list(depth_bins["Category"])
-    lbl_ft = list(depth_bins["Depth_Label_ft"])
-    lbl_m = list(depth_bins["Depth_Label_m"])
+    lbl_ft = list(depth_bins["Label_ft"])
+    lbl_m = list(depth_bins["Label_m"])
     dmin = np.asarray(depth_bins["D_Min"], dtype=np.float32)
     dmax = np.asarray(depth_bins["D_Max"], dtype=np.float32)
 
@@ -1583,8 +1583,8 @@ def bin_depth_with_overlays(
     ):
         raise ValueError(
             "All depth_bins arrays/lists must have the same length: "
-            f"ID={len(ids)}, Category={len(cats)}, Depth_Label_ft={len(lbl_ft)}, "
-            f"Depth_Label_m={len(lbl_m)}, D_Min={dmin.size}, D_Max={dmax.size}"
+            f"ID={len(ids)}, Category={len(cats)}, Label_ft={len(lbl_ft)}, "
+            f"Label_m={len(lbl_m)}, D_Min={dmin.size}, D_Max={dmax.size}"
         )
 
     if n_depth_bins > 1 and not np.all(np.diff(dmin) > 0):

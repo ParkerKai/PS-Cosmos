@@ -138,7 +138,7 @@ def main():
     # -----------------------------
     dir_in = r"D:\Kai\WFLOW"
     dir_out = r"D:\Kai\WFLOW"
-    cnty = "whatcom"
+    cnty = "pierce"
     var = "Q_contour"
     station_dim = (
         "Q_contour_gauges_contour"  # adjust if your variable uses a different name

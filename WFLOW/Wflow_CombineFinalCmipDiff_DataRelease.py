@@ -35,7 +35,7 @@ from dask.distributed import Client, LocalCluster
 dir_in = r"D:\Kai\WFLOW"
 
 # model grid to process (county)
-cnty = "thurston"
+cnty = "kitsap"
 
 # ===============================================================================
 # %% Define some functions
@@ -264,7 +264,11 @@ def main():
     contour = np.full(ds_diff["station"].size, np.nan)
     stat_geom = []
     for cnt, stat in enumerate(ds_diff["station"].values):
-        pull = df.query("fid == @stat")
+        # outputs have different ID key depending on county run
+        if "fid" in df.columns:
+            pull = df.query("fid == @stat")
+        elif "gauge_id" in df.columns:
+            pull = df.query("gauge_id == @stat")
 
         lat[cnt] = pull["geometry"].y.to_numpy()[0]
         lon[cnt] = pull["geometry"].x.to_numpy()[0]

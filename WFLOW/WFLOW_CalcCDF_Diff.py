@@ -164,9 +164,10 @@ def main():
     Mod_list = ["CNRM", "EcEarth", "GFDL", "HadGemHH", "HadGemHM", "HadGemHMsst"]
 
     # model grid to process (county)
-    cnty = "thurston"
+    cnty = "kitsap"
 
-    n_workers = 8
+    n_workers = 6
+
 
     # -----------------------------
     # Dask cluster
@@ -200,12 +201,19 @@ def main():
     elif (cnty == "snohomish") or (cnty == "kitsap"):
         dir_runs = "11_20_2025_Discharges_SnohomishKitsap"
 
-    elif cnty == "mason":
+    elif (
+        (cnty == "mason")
+        or (cnty == "thurston")
+        or (cnty == "whatcom")
+        or (cnty == "jefferson")
+        or (cnty == "skagit")
+        or (cnty == "clallam")
+    ):
         dir_runs = None
 
     files = os.path.join(
         dir_in,
-   #     dir_runs,
+        dir_runs,
         cnty,
         "era5_3hourly",
         "output_scalar.nc",
@@ -221,9 +229,8 @@ def main():
     ds_save1 = [i for i in range(len(Mod_list))]
     ds_save2 = [i for i in range(len(Mod_list))]
 
-    dir_out_full =   os.path.join(dir_out, cnty, "cdf_diff")
+    dir_out_full = os.path.join(dir_out, cnty, "cdf_diff")
     os.makedirs(dir_out_full, exist_ok=True)
-
 
     for cnt, Mod in enumerate(Mod_list):
         print(f"Processing CMIP6 Difference for {Mod}")
@@ -239,7 +246,7 @@ def main():
             with open(
                 os.path.join(
                     dir_in,
-#                    dir_runs,
+                                        dir_runs,
                     cnty,
                     f"cmip6_{Mod}_historic_bc",
                     "CDFmonthly_{0:02d}.pkl".format(month),
@@ -252,7 +259,7 @@ def main():
             with open(
                 os.path.join(
                     dir_in,
-#                    dir_runs,
+                                        dir_runs,
                     cnty,
                     f"cmip6_{Mod}_future_bc",
                     "CDFmonthly_{0:02d}.pkl".format(month),
@@ -265,7 +272,7 @@ def main():
             with open(
                 os.path.join(
                     dir_in,
-#                    dir_runs,
+                                        dir_runs,
                     cnty,
                     "era5_3hourly",
                     "CDFmonthly_{0:02d}.pkl".format(month),
