@@ -61,6 +61,21 @@ def rp_tag(rp: float) -> str:
     return f"RP{int(round(rp)):03d}"
 
 
+
+def infer_water_year_from_time_array(t_values: np.ndarray) -> int:
+    """
+    Infer water year (WY) from an array of datetime-like values.
+    Convention: WY = year + 1 when month >= 10 (Oct–Dec), else year.
+    Uses the **first** valid timestamp in the array.
+    """
+    pdt = pd.to_datetime(t_values)
+    if pdt.size == 0:
+        raise ValueError("Cannot infer water year: empty time coordinate.")
+    dt0 = pdt[0]
+    wy = int(dt0.year + (1 if dt0.month >= 10 else 0))
+    return wy
+
+
 def _parse_timedelta_to_ns(r) -> int:
     """Parse '24h' / '72h' / timedelta64 / pd.Timedelta to nanoseconds."""
     if isinstance(r, np.timedelta64):
@@ -583,45 +598,72 @@ def _open_sfincs_map(
         units = t.attrs.get("units", None)
         calendar = t.attrs.get("calendar", "standard")  # default
 
-        if not units or "since" not in units:
-            # Fallback: treat values as "seconds since 1970-01-01" if units missing
-            origin = np.datetime64("1970-01-01T00:00:00")
-            t_dt = origin + t_clean.astype("timedelta64[s]")
-        else:
-            # Parse CF units: "<time_units> since <YYYY-MM-DD HH:MM:SS>"
-            # Normalize to ISO "YYYY-MM-DDTHH:MM:SS"
-            try:
-                ref = units.split("since", 1)[1].strip()
-                # Allow "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DD"
-                if " " in ref and "T" not in ref:
-                    ref = ref.replace(" ", "T")
-                origin = np.datetime64(ref)
-            except Exception:
-                # Conservative fallback if units string is odd
-                origin = np.datetime64("1970-01-01T00:00:00")
-
-            # Choose numpy vs cftime path
-            if calendar in ("standard", "gregorian", "proleptic_gregorian", None):
-                # Numpy datetime64 (seconds resolution)
-                t_dt = origin + t_clean.astype("timedelta64[s]")
+        def _parse_cf_units(units_str: str) -> tuple[str, np.timedelta64]:
+            """
+            Return (origin_iso, step_dt64) where step_dt64 is one of
+            'timedelta64[s]', '[m]', '[h]', '[D]', etc.
+            """
+            if not units_str or "since" not in units_str:
+                return "1970-01-01T00:00:00", np.timedelta64(1, 's')
+            base, ref = units_str.split("since", 1)
+            base = base.strip().lower()
+            ref = ref.strip()
+            if " " in ref and "T" not in ref:
+                ref = ref.replace(" ", "T")
+            # Map CF time units to numpy timedelta64 units
+            if   "nanosecond" in base or base == "ns":
+                step = np.timedelta64(1, 'ns')
+            elif "microsecond" in base or base in ("us", "µs"):
+                step = np.timedelta64(1, 'us')
+            elif "millisecond" in base or base == "ms":
+                step = np.timedelta64(1, 'ms')
+            elif "second" in base or base == "s" or base.startswith("sec"):
+                step = np.timedelta64(1, 's')
+            elif "minute" in base or base == "m" or base.startswith("min"):
+                step = np.timedelta64(1, 'm')
+            elif "hour"   in base or base == "h":
+                step = np.timedelta64(1, 'h')
+            elif "day"    in base or base in ("d", "D"):
+                step = np.timedelta64(1, 'D')
             else:
-                # Non-standard calendar: use cftime
-                import cftime
+                # Conservative fallback
+                step = np.timedelta64(1, 's')
+            return ref, step
 
-                t_dt = xr.apply_ufunc(
-                    lambda v: np.array(
-                        cftime.num2date(
-                            v.astype("float64"),
-                            units,
-                            calendar,
-                            only_use_cftime_datetimes=True,
-                        )
-                    ),
-                    t_clean,
-                    vectorize=True,
-                    dask="parallelized",
-                    output_dtypes=[object],  # object -> cftime datetime
-                )
+        origin_iso, step = _parse_cf_units(units)
+
+        try:
+            origin = np.datetime64(origin_iso)
+        except Exception:
+            origin = np.datetime64("1970-01-01T00:00:00")
+
+        # Convert cleaned numeric values to timedeltas in the correct unit
+        if calendar in ("standard", "gregorian", "proleptic_gregorian", None):
+            # numpy datetime64 path
+            # NOTE: if step is 'D' and values are float, cast to 'timedelta64[ns]' via seconds
+            #       to avoid loss for sub-day units. We scale explicitly:
+            # Determine multiplier to nanoseconds
+            unit_scale = {
+                'ns': 1, 'us': 1_000, 'ms': 1_000_000, 's': 1_000_000_000,
+                'm': 60 * 1_000_000_000, 'h': 3600 * 1_000_000_000, 'D': 86_400 * 1_000_000_000
+            }
+            step_unit = str(step).split('[')[-1].rstrip(']')
+            scale_ns = unit_scale.get(step_unit, 1_000_000_000)  # default seconds
+            # t_clean is float seconds in *step units*, so multiply to ns
+            td_ns = (t_clean * scale_ns).astype("timedelta64[ns]")
+            t_dt = origin + td_ns
+        else:
+            # non-standard calendar via cftime
+            import cftime
+            t_dt = xr.apply_ufunc(
+                lambda v: np.array(cftime.num2date(v.astype("float64"), units, calendar,
+                                                only_use_cftime_datetimes=True)),
+                t_clean,
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[object],
+            )
+
 
         # --- 2c) Attach decoded coord, tidy attrs ---------------------------------
         ds = ds.assign_coords({time_dim: t_dt})
@@ -735,7 +777,7 @@ def aggregate_water_year_maxima(
         zsmax_ann = zs_valid.isel({time_dim: i_peak}).where(~all_nan)
         t_peak = ds[time_dim].isel({time_dim: i_peak})
 
-        year_label = int(pd.to_datetime(ds[time_dim].values).year[0])
+        year_label = infer_water_year_from_time_array(ds[time_dim].values)
 
         out = xr.Dataset(
             {"zsmax_ann": zsmax_ann.drop_vars(time_dim, errors="ignore")},
@@ -933,6 +975,7 @@ def eva_pot(
     )
 
 
+
 def eva_apply(
     ds_annual: xr.Dataset,
     method: Literal["weibull", "gev", "pot"],
@@ -943,16 +986,13 @@ def eva_apply(
     pot_target_per_year: int = 5,
     pot_decluster: str = "72h",
     gev_min_years: int = 5,
+    *,
+    z_floor: Optional[np.ndarray] = None,
 ) -> xr.Dataset:
-    """Dispatch EVA over annual maxima (or full series for POT).
-
-    The aggregation mode of `ds_annual` (stamped at build time) controls
-    which methods are valid:
-
-      - "annual_max": all three EVA methods supported. Weibull / GEV use
-        `ds_annual["zsmax_ann"]`; POT requires `ds_full_timeseries`.
-      - "all_maxima": only POT is supported. The dataset itself acts as
-        the timeseries; `ds_full_timeseries` is ignored if passed.
+    """
+    Extended EVA dispatcher with optional dry-floor masking.
+    If `z_floor` is provided (shape == n_faces), any RP WSE ≤ z_floor + 1e-4
+    is set to NaN.
     """
     method = method.lower()
     agg_mode = ds_annual.attrs.get("aggregation_mode", "annual_max")
@@ -1007,7 +1047,22 @@ def eva_apply(
     out = xr.Dataset({"zsmax_rp": zsmax_rp})
     out.attrs["eva_method"] = method
     out.attrs["aggregation_mode"] = agg_mode
+
+    # Optional dry-floor masking (z_zmin)
+    if z_floor is not None:
+        # Align floor along face_dim
+        if z_floor.ndim != 1:
+            raise ValueError("z_floor must be a 1D array of length n_faces.")
+        floor = xr.DataArray(
+            z_floor.astype(np.float64),
+            dims=(face_dim,),
+            coords={face_dim: out["zsmax_rp"][face_dim]},
+        )
+        masked = xr.where(out["zsmax_rp"] > floor + 1e-4, out["zsmax_rp"], np.nan)
+        out["zsmax_rp"] = masked
+
     return out
+
 
 
 # =============================================================================
@@ -1077,7 +1132,8 @@ def map_quadtree_to_dem_nearest(
     values = da_face.values.astype(np.float32)
 
     with rasterio.open(indices_fn) as idx_src:
-        idx_nodata = int(idx_src.nodata)
+        idx_nodata_val = idx_src.nodata
+        idx_nodata = int(idx_nodata_val) if idx_nodata_val is not None else -1
         meta = idx_src.meta.copy()
 
     meta.update(
@@ -1107,7 +1163,7 @@ def map_quadtree_to_dem_nearest(
                     wet = np.isfinite(dep_block) & (dep_block > hmin)
                 else:
                     wet = np.ones_like(idx_block, dtype=bool)
-                valid = (idx_block != idx_nodata) & wet
+                valid = (idx_block != idx_nodata) & wet if idx_nodata_val is not None else wet & np.isfinite(idx_block)
                 out_block = np.full(idx_block.shape, np.nan, dtype=np.float32)
                 if np.any(valid):
                     out_block[valid] = values[idx_block[valid].astype(np.intp)]
@@ -2011,12 +2067,12 @@ def export_connectivity_regions(
         # Split MultiPolygons into single-part features (each part is treated as a region)
         gdf = gdf.explode(index_parts=False, ignore_index=True)
         # Optional simplify to reduce vertex count
-        if (simplify_tolerance is not None) and (simplify_tolerance > 0):
-            gdf = gdf.set_geometry(
-                gdf.geometry.simplify_coverage(
-                    simplify_tolerance, simplify_boundary=True
-                )
-            )
+        if simplify_tolerance is not None and simplify_tolerance > 0:
+            if hasattr(gdf.geometry, "simplify_coverage"):
+                gdf = gdf.set_geometry(gdf.geometry.simplify_coverage(simplify_tolerance, simplify_boundary=True))
+            else:
+                gdf = gdf.set_geometry(gdf.geometry.simplify(float(simplify_tolerance), preserve_topology=True))
+
         # Assign sequential region IDs per shapefile
         gdf["region_id"] = np.arange(1, len(gdf) + 1, dtype=int)
         gdf["ID"] = id_value
