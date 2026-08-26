@@ -18,6 +18,7 @@ __email__ = "kaparker@usgs.gov"
 # ===============================================================================
 # Import Modules (no Dask)
 # ===============================================================================
+
 import os
 from glob import glob
 import re
@@ -27,42 +28,69 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 import geopandas as gpd
-
 import shapely
 from shapely import make_valid
 
+# -------------------------
+# Config (same as before)
+# -------------------------
+SLR = "000"
+
+dir_ERA5 = os.path.join(r"D:\Kai\DFM\ERA5", f"ERA5_{SLR}", "Results_Combined")
+dir_diff = os.path.join(r"D:\Kai\DFM\CDF_diff", f"{SLR}")
+dir_Tidal = os.path.join(r"D:\Kai\DFM\ERA5_tidal\Results_combined", SLR)
+dir_gis = r"D:\Kai\DFM\GIS"
+dir_out = os.path.join(r"D:\Kai\DFM", f"Combined_{SLR}")
+
+PACK_SCALE = 1e-4  # meters per integer count
+FILL_INT = -9999
+
+TARGET_EPSG = 4326
+COUNTY_SHP = os.path.join(dir_gis, "Washington_Counties_(no_water)___washco_area.shp")
+REMOVE_SHP = os.path.join(dir_gis, "StationRemove.shp")
+
+county_list = [
+    "Kitsap", "Snohomish", "Island", "Skagit", "Jefferson",
+    "King", "Pierce", "Thurston", "Whatcom", "Mason",
+    "San Juan", "Clallam",
+]
+
 # ===============================================================================
-# Helpers & Functions
+# Helpers (mostly unchanged, plus new subset-aware loader and county indexer)
 # ===============================================================================
 
 def normalize(s):
-    """Normalize strings: remove non-alphanumerics, strip, lowercase."""
     if s is None:
         return None
     return re.sub(r"\W+", "", str(s)).strip().lower()
 
-
 def _preprocess(ds: xr.Dataset) -> xr.Dataset:
-    """
-    Preprocess a single dataset:
-      - sort by time
-      - drop duplicate time stamps (keep first)
-      - normalize station dtype to string, strip
-      - remove 'time' dim from invariant vars (lon, lat, bedlevel)
-    """
+    # Sort & dedup time
     ds = ds.sortby("time")
-    # Unique times
-    tvals = ds["time"].values
-    _, keep = np.unique(tvals, return_index=True)
-    ds = ds.isel(time=np.sort(keep))
+    if "time" in ds:
+        tvals = ds["time"].values
+        _, keep = np.unique(tvals, return_index=True)
+        ds = ds.isel(time=np.sort(keep))
 
-    # Normalize station dtype
-    st = xr.DataArray(
-        pd.Index(pd.Series(ds["station"].values).astype(str).str.strip().values),
-        dims="station",
-        name="station",
-    )
-    ds = ds.assign_coords(station=st.astype("U64"))
+    # --- Ensure 'station' coordinate exists and is string-normalized ---
+    if "station" in ds.dims:
+        # Prefer coordinate if present; otherwise build from indices
+        if "station" in ds.coords:
+            st_vals = ds.coords["station"].values
+        else:
+            # No coordinate variable → use indices as labels
+            st_vals = np.arange(ds.dims["station"], dtype=np.int32)
+
+        st = xr.DataArray(
+            pd.Index(pd.Series(st_vals).astype(str).str.strip().values),
+            dims="station",
+            name="station",
+        )
+        ds = ds.assign_coords(station=st.astype("U64"))
+    else:
+        # No station dimension at all → fallback (skip later if needed)
+        ds = ds.expand_dims({"station": 1})
+        ds = ds.assign_coords(station=np.array(["unknown"], dtype="U64"))
 
     # Remove time from invariant vars
     for var in ["lon", "lat", "bedlevel"]:
@@ -73,63 +101,37 @@ def _preprocess(ds: xr.Dataset) -> xr.Dataset:
 
 
 def ensure_unique_sorted_time(ds: xr.Dataset, keep: str = "first") -> xr.Dataset:
-    """
-    Drop duplicate time stamps and sort by time.
-    keep: 'first' or 'last' — which duplicate to keep.
-    """
-    tvals = ds["time"].values
-    pdt = pd.to_datetime(tvals)  # robust conversion
+    pdt = pd.to_datetime(ds["time"].values)
     dup_mask = pd.Series(pdt).duplicated(keep=keep).to_numpy()
     if dup_mask.any():
         ds = ds.isel(time=~dup_mask)
     ds = ds.sortby("time")
     return ds
 
-
 def assert_regular_time(ds: xr.Dataset, label: str = "dataset") -> None:
-    """
-    Assert the 'time' coordinate is strictly monotonic, has no duplicates,
-    and is regularly sampled (constant cadence) after concatenation.
-
-    Raises ValueError with informative details on failure.
-    """
     if "time" not in ds.coords:
         raise ValueError(f"{label}: missing 'time' coordinate")
-
     t = pd.to_datetime(ds["time"].values)
     if t.size == 0:
         raise ValueError(f"{label}: empty time axis")
-
-    # No NaT
     if pd.isna(t).any():
         bad_idx = np.where(pd.isna(t))[0]
         raise ValueError(f"{label}: NaT found at indices {bad_idx[:10]}")
-
-    # Monotonic non-decreasing
     diffs = np.diff(t.values)
     if (diffs < np.timedelta64(0, "ns")).any():
         bad_idx = np.where(diffs < np.timedelta64(0, "ns"))[0]
         raise ValueError(f"{label}: time not monotonically increasing; examples at indices {bad_idx[:10]}")
-
-    # No duplicates
     nunique = pd.Index(t).nunique()
     if nunique != t.size:
         raise ValueError(f"{label}: duplicate time stamps detected (n={t.size}, unique={nunique})")
-
-    # Regular cadence check (constant delta)
-    # Convert diffs to integer nanoseconds for exact comparison
+    # regular cadence
     diffs_ns = np.array([int(np.timedelta64(d, "ns")) for d in diffs])
     if diffs_ns.size == 0:
-        return  # single sample, trivially regular
-
-    # Most common step (mode)
-    # Use numpy to get mode robustly
+        return
     vals, counts = np.unique(diffs_ns, return_counts=True)
     step_ns = vals[np.argmax(counts)]
-
     irregular_idx = np.where(diffs_ns != step_ns)[0]
     if irregular_idx.size > 0:
-        # Show a few examples with actual timestamps
         examples = [
             (str(t[i]), str(t[i + 1]), f"Δ={pd.to_timedelta(diffs_ns[i], unit='ns')}")
             for i in irregular_idx[:10]
@@ -140,47 +142,123 @@ def assert_regular_time(ds: xr.Dataset, label: str = "dataset") -> None:
             f"Examples: {examples}"
         )
 
+def _union_valid(geom_series):
+    """Version-safe union and validity fix for polygons."""
+    try:
+        united = geom_series.union_all()  # GeoPandas ≥0.13
+    except AttributeError:
+        united = geom_series.unary_union   # older GeoPandas
+    return make_valid(united)
 
-def load_and_concat(
+def build_station_metadata(example_file: str, engine: str = "netcdf4") -> pd.DataFrame:
+    """
+    Read station, lon, lat with minimal IO from a representative ERA5 file.
+    """
+    ds = xr.open_dataset(example_file, engine=engine)
+    ds = _preprocess(ds)
+    # Extract 1D station info
+    st = pd.Index(ds["station"].values)
+    lon = ds["lon"].values
+    lat = ds["lat"].values
+    return pd.DataFrame({"station": st.astype(str), "lon": lon.astype("float32"), "lat": lat.astype("float32")})
+
+def build_county_station_labels(
+    station_df: pd.DataFrame,
+    county_shp: str,
+    county_list: list[str],
+    remove_shp: str | None = None,
+    target_epsg: int = 4326,
+    boundary_predicate: str = "covered_by",  # includes boundary points
+):
+    """
+    Returns:
+      county_map: dict {county_name_norm: np.ndarray of station labels}
+      out_of_county: np.ndarray of station labels outside all targets
+    """
+    # County polygons
+    counties = gpd.read_file(county_shp)
+    counties = counties.to_crs(crs=f"EPSG:{target_epsg}")
+    counties["COUNTY_norm"] = counties["COUNTY"].astype(str).map(normalize)
+    target_norm = {normalize(c) for c in county_list}
+    counties = counties[counties["COUNTY_norm"].isin(target_norm)].copy()
+    if counties.empty:
+        raise ValueError("No matching counties found after normalization.")
+
+    # Station points
+    stations_gdf = gpd.GeoDataFrame(
+        station_df,
+        geometry=gpd.points_from_xy(station_df["lon"], station_df["lat"]),
+        crs=f"EPSG:{target_epsg}",
+    )
+
+    # Optional polygon removal
+    if remove_shp and os.path.exists(remove_shp):
+        removal = gpd.read_file(remove_shp)
+        if removal.crs is None:
+            raise ValueError("StationRemove.shp has no CRS defined.")
+        removal = removal.to_crs(target_epsg)
+        removal_geom = _union_valid(removal.geometry)
+        pts = shapely.points(station_df["lon"].values, station_df["lat"].values)
+        if boundary_predicate == "contains":
+            inside = shapely.contains(removal_geom, pts)
+        elif boundary_predicate == "covered_by":
+            inside = shapely.covered_by(pts, removal_geom)
+        elif boundary_predicate == "intersects":
+            inside = shapely.intersects(pts, removal_geom)
+        else:
+            raise ValueError("predicate must be one of: 'contains', 'covered_by', 'intersects'")
+        # Keep only stations NOT inside removal polygon
+        stations_gdf = stations_gdf.loc[~inside].copy()
+
+    # Spatial join (stations→county)
+    j = gpd.sjoin(stations_gdf, counties[["geometry", "COUNTY_norm"]], how="left", predicate="intersects")
+    # Build map
+    county_map = {}
+    for cname in sorted(target_norm):
+        labels = j.loc[j["COUNTY_norm"] == cname, "station"].astype(str).values
+        county_map[cname] = labels
+    out_labels = j.loc[j["COUNTY_norm"].isna(), "station"].astype(str).values
+    return county_map, out_labels
+
+def load_and_concat_subset(
     files: list[str],
+    station_labels: np.ndarray,
     preprocess=_preprocess,
     engine: str = "netcdf4",
     label: str = "dataset",
 ) -> xr.Dataset:
     """
-    Load each file via xarray.open_dataset (no Dask), materialize it in memory,
-    preprocess, and concatenate along the 'time' dimension. Ensures unique, sorted times.
-
-    Parameters
-    ----------
-    files : list[str]
-        List of file paths to load and concatenate.
-    preprocess : callable
-        Function applied to each dataset prior to concatenation.
-    engine : str
-        NetCDF engine for open_dataset; default 'netcdf4'.
-    label : str
-        Human-readable dataset label used in error messages.
-
-    Returns
-    -------
-    ds_cat : xr.Dataset
-        Concatenated dataset along time.
+    Memory-aware loader: process per file, subset stations BEFORE loading,
+    then concatenate along 'time'.
     """
     if not files:
         raise FileNotFoundError(f"{label}: no input files found")
 
     dsets = []
+    # Ensure labels are str array
+    station_labels = np.array(pd.Index(station_labels).astype(str))
     for fp in sorted(files):
-        # Load and preprocess
         ds = xr.open_dataset(fp, engine=engine)
         if preprocess is not None:
             ds = preprocess(ds)
-        # Load into memory (detach from file handles)
+        # Subset by station name/label; if some labels missing, intersect
+                
+        have = pd.Index(ds["station"].values).astype(str)
+        pick = have.intersection(station_labels)
+        if pick.size == 0:
+            # Nothing to load from this file for this county
+            # Optional: print a few sample stations to diagnose mismatches
+            print(f"NOTE: {os.path.basename(fp)}: no matching stations for county; sample labels: {list(have[:3])}")
+            continue
+
+        ds = ds.sel(station=pick.values)
+        # Materialize ONLY the subset
         ds.load()
         dsets.append(ds)
 
-    # Concatenate along time
+    if not dsets:
+        raise ValueError(f"{label}: no data for requested station subset")
+
     ds_cat = xr.concat(
         dsets,
         dim="time",
@@ -188,341 +266,46 @@ def load_and_concat(
         coords="minimal",
         compat="override",
     )
-
-    # Ensure uniqueness and sorted times
     ds_cat = ensure_unique_sorted_time(ds_cat)
-
-    # Validate time axis integrity
     assert_regular_time(ds_cat, label=label)
-
     return ds_cat
 
-
-def mask_stations_by_polygon(
-    ds: xr.Dataset,
-    remove_shp_path: str,
-    station_dim: str = "station",
-    lat_var: str = "lat",
-    lon_var: str = "lon",
-    predicate: str = "contains",  # 'contains', 'covered_by', or 'intersects'
-    target_epsg: int = 4326,
-):
-    """
-    Remove stations whose lat/lon fall inside (or touch) polygons from a removal shapefile.
-    Works with scattered xarray datasets where lat/lon are variables along the 'station' dimension.
-    """
-    # --- Read and normalize shapefile
-    if not os.path.exists(remove_shp_path):
-        raise FileNotFoundError(f"Removal shapefile not found: {remove_shp_path}")
-
-    remove_gdf = gpd.read_file(remove_shp_path)
-    if remove_gdf.crs is None:
-        raise ValueError("StationRemove.shp has no CRS defined. Please set its correct CRS before running.")
-
-    # Reproject polygons to WGS84 if needed
-    if (remove_gdf.crs.to_epsg() or 0) != target_epsg:
-        remove_gdf = remove_gdf.to_crs(target_epsg)
-
-    # Union polygons into a single coverage geometry and fix validity
-    removal_geom = make_valid(remove_gdf.geometry.union_all())
-
-    # --- Extract station coordinates (1D arrays)
-    if lat_var not in ds or lon_var not in ds:
-        raise KeyError(f"Dataset must contain variables '{lat_var}' and '{lon_var}'.")
-
-    lat = ds[lat_var].values
-    lon = ds[lon_var].values
-
-    # Expect lat/lon to be 1D over 'station'
-    if ds[lat_var].ndim != 1 or ds[lon_var].ndim != 1 or ds[lat_var].dims[0] != station_dim or ds[lon_var].dims[0] != station_dim:
-        raise ValueError(f"'{lat_var}' and '{lon_var}' must be 1D variables over the '{station_dim}' dimension.")
-
-    # --- Build Points (vectorized) and test predicate
-    pts = shapely.points(lon, lat)  # array of shapely Point objects
-
-    if predicate == "contains":
-        inside = shapely.contains(removal_geom, pts)
-    elif predicate == "covered_by":
-        inside = shapely.covered_by(pts, removal_geom)
-    elif predicate == "intersects":
-        inside = shapely.intersects(pts, removal_geom)
-    else:
-        raise ValueError("predicate must be one of: 'contains', 'covered_by', 'intersects'")
-
-    # --- Build a station mask DataArray and apply
-    station_flag = xr.DataArray(
-        inside,
-        dims=(station_dim,),
-        coords={station_dim: ds[station_dim]},
-    )
-
-    ds_masked = ds.where(~station_flag, drop=True)
-    n_removed = int(station_flag.sum().item())
-    print(f"Removed {n_removed} stations.")
-    return ds_masked, station_flag
-
-
 # ===============================================================================
-# Main
+# County-first pipeline
 # ===============================================================================
 
-# ===============================================================================
-# User Defined inputs
-# ===============================================================================
-SLR = "000"
+print("Building station metadata and county station labels...")
 
-dir_ERA5 = os.path.join(r"D:\Kai\DFM\ERA5", f"ERA5_{SLR}","Results_Combined")
-dir_diff = os.path.join(r"D:\Kai\DFM\CDF_diff", f"{SLR}")
-dir_Tidal = os.path.join(r"D:\Kai\DFM\ERA5_tidal", "ResultsCombined",SLR)
-dir_gis = r"D:\Kai\DFM\GIS"
-dir_out = os.path.join(r"D:\Kai\DFM", f"Combined_{SLR}")
+# Probe one ERA5 file to get station metadata only
+era5_files = sorted(glob(os.path.join(dir_ERA5, "ERA5_cdf*")))
+tidal_files = sorted(glob(os.path.join(dir_Tidal, "*.nc")))
+diff_files = sorted(glob(os.path.join(dir_diff, "*.nc")))
 
-# Packing information
-PACK_SCALE = 1e-4  # meters per integer count (i.e., meters * 1e4)
-FILL_INT = -9999
+if not era5_files or not tidal_files or not diff_files:
+    raise FileNotFoundError("Missing inputs: check ERA5, tidal-only, and CMIP6 diff directories.")
 
-# ===============================================================================
-# Load the data (no Dask; manual concatenation)
-# ===============================================================================
-print("Loading & concatenating data (no Dask)...")
-
-files = sorted(glob(os.path.join(dir_ERA5, "ERA5_cdf*")))
-ds_full = load_and_concat(files, preprocess=_preprocess, engine="netcdf4", label="ERA5/full")
-
-files = sorted(glob(os.path.join(dir_Tidal, "*.nc")))
-ds_tidal = load_and_concat(files, preprocess=_preprocess, engine="netcdf4", label="Tidal-only")
-
-files = sorted(glob(os.path.join(dir_diff, "*.nc")))
-ds_diff = load_and_concat(files, preprocess=_preprocess, engine="netcdf4", label="CMIP6 difference")
-
-# Some of the ds_diff values got limited by the integer conversion — constrain only the data var
-if "cmip_diff" in ds_diff:
-    ds_diff["cmip_diff"] = ds_diff["cmip_diff"].where(
-        (ds_diff["cmip_diff"] >= -2_000_000_000) & (ds_diff["cmip_diff"] <= 2_000_000_000)
-    )
-
-# Tide starts earlier: clip to ERA5 time span
-ds_tidal = ds_tidal.sel(time=slice(ds_full["time"][0], ds_full["time"][-1]))
-
-# ===============================================================================
-# Process and convert to new dataset
-# ===============================================================================
-
-# Interpolate to hourly using nearest within a 2h tolerance
-print("Interpolating to hourly...")
-ds_full = ds_full.resample(time="1h").nearest(tolerance="2h")
-ds_tidal = ds_tidal.resample(time="1h").nearest(tolerance="2h")
-ds_diff = ds_diff.resample(time="1h").nearest(tolerance="2h")
-
-# Ensure uniqueness post-resample
-ds_full = ensure_unique_sorted_time(ds_full)
-ds_tidal = ensure_unique_sorted_time(ds_tidal)
-ds_diff = ensure_unique_sorted_time(ds_diff)
-
-# Exact intersection along time & station
-ds_full, ds_tidal, ds_diff = xr.align(
-    ds_full,
-    ds_tidal,
-    ds_diff,
-    join="inner",  # intersection only
-    exclude=[],
+station_meta = build_station_metadata(era5_files[0], engine="netcdf4")
+county_map, out_of_county = build_county_station_labels(
+    station_meta,
+    COUNTY_SHP,
+    county_list,
+    remove_shp=REMOVE_SHP,
+    target_epsg=TARGET_EPSG,
+    boundary_predicate="covered_by",
 )
 
-# Confirm uniqueness again
-ds_full = ensure_unique_sorted_time(ds_full)
-ds_tidal = ensure_unique_sorted_time(ds_tidal)
-ds_diff = ensure_unique_sorted_time(ds_diff)
+# Optional “OutOfCounty” bucket
+county_order = list(county_map.keys()) + ["outofcounty"]
 
-# Create the final dataset and derived variables
-print("Creating ds_era5 dataset...")
-ds_era5 = ds_full.copy()
-ds_era5["ntr"] = ds_full["waterlevel"] - ds_tidal["waterlevel"]
+o = [4, 9, 0, 1,2,3,5,6,7,8,10,11,12]
+county_order = [county_order[i] for i in o]
 
-# Drop Bedlevel if present
-if "bedlevel" in ds_era5:
-    ds_era5 = ds_era5.drop_vars("bedlevel")
 
-# Remove any packing/encoding from lon/lat and ensure pure float32 without 'time'
-for var in ["lon", "lat"]:
-    if var in ds_era5:
-        da = ds_era5[var].copy().astype("float32")
-        for key in ("ScaleFactor", "scale_factor", "add_offset", "_FillValue", "dtype"):
-            da.attrs.pop(key, None)
-        da.encoding.clear()
-        ds_era5[var] = da
+# Output directory
+os.makedirs(dir_out, exist_ok=True)
+print("Output directory ready:", dir_out)
 
-# Add the CMIP6 difference to the dataset (aligned)
-ds_diff = ds_diff.reindex(time=ds_full["time"], station=ds_full["station"], method=None)
-ds_era5["wl_CmipDiff"] = ds_diff["cmip_diff"] / 10000.0  # convert packed ints to meters
-
-# Deal with scaling for waterlevel and ntr (original integers)
-ds_era5["waterlevel"] = ds_era5["waterlevel"] / 10000.0
-ds_era5["ntr"] = ds_era5["ntr"] / 10000.0
-
-# Remove SLR (SLR provided in cm units)
-ds_era5["waterlevel"] = ds_era5["waterlevel"] - (int(SLR) / 100.0)
-
-# --- Monthly quantiles (percent ranks per station within calendar month) ---
-ds_era5["waterlevel"] = ds_era5["waterlevel"].astype("float32")
-wl_quants = ds_era5["waterlevel"].groupby("time.month").map(
-    lambda g: g.rank(dim="time", pct=True)
-).transpose("time", "station").astype("float32")
-ds_era5["wl_quants"] = wl_quants
-
-# Attributes
-ds_era5["waterlevel"].attrs = {
-    "units": "meters",
-    "standard_name": "sea_surface_height_above_reference_datum",
-    "long_name": "water level",
-    "reference": "NAVD88",
-    "desc": "Modeled water levels for the reanalysis period (SLR removed)",
-    "note": "Variable scaled with _ScaleFactor in file. Confirm correct decoding by your software.",
-    "precision": "Data encoded as integer with 4 significant digits.",
-}
-
-ds_era5["ntr"].attrs = {
-    "units": "meters",
-    "long_name": "non-tidal residual",
-    "desc": "Calculated by subtracting modeled water levels with tidal-only forcing from a run with full forcing.",
-    "reference": "NAVD88",
-    "note": "Variable scaled with _ScaleFactor in file.",
-    "precision": "Data encoded as integer with 4 significant digits.",
-}
-
-ds_era5["wl_CmipDiff"].attrs = {
-    "long_name": "CMIP6 difference in water levels",
-    "units": "meters",
-    "desc": (
-        "Predicted change by each CMIP6 model for each ERA5 water level value. "
-        "Delta is calculated by subtracting the future period (2015-2050) from the historic period (1950-2014). "
-        "Change is calculated for each quantile for each month."
-    ),
-    "usage": "Adding wl_CmipDiff to waterlevel produces the pseudo-global-warming time series.",
-    "note": "Variable scaled with _ScaleFactor in file.",
-    "precision": "Data encoded as integer with 4 significant digits.",
-}
-
-ds_era5["wl_quants"].attrs = {
-    "units": "None",
-    "standard_name": "waterlevel_monthly_percentile",
-    "long_name": "Monthly water level percentile (per station, across all years)",
-    "desc": (
-        "For each timestamp, percentile (0-1) of the water level within its calendar month, "
-        "computed across all years for that station."
-    ),
-    "note": "Encoded as integer in file with scale_factor=1e-4 (see encoding).",
-    "precision": "4 decimal places after unpacking.",
-}
-
-ds_era5["lon"].attrs = {
-    "standard_name": "longitude",
-    "long_name": "x-coordinate of station",
-    "projection": "WGS 84",
-    "epsg": "4326",
-    "units": "degree_east",
-}
-ds_era5["lat"].attrs = {
-    "standard_name": "latitude",
-    "long_name": "y-coordinate of station",
-    "projection": "WGS 84",
-    "epsg": "4326",
-    "units": "degrees_north",
-}
-
-if "cmip6" in ds_era5.coords:
-    ds_era5["cmip6"].attrs = {"long_name": "CMIP6 Model (HighResMIP)"}
-
-# Global Attributes
-ds_era5.attrs["processing_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-ds_era5.attrs.pop("forcing", None)
-ds_era5.attrs.pop("source_dir", None)
-ds_era5.attrs["author"] = "Kai Parker (USGS PCMSC)"
-ds_era5.attrs["description"] = (
-    "This dataset contains modeled water levels and non-tidal residual for the reanalysis period. "
-    "Modeled changes to the reanalysis time series (as predicted by CMIP6) are also included. "
-    "Output is for stations in the Salish Sea."
-)
-ds_era5.attrs["DataReleaseCitation"] = "XXXXXX"
-ds_era5.attrs["ModelCitation"] = "XXXXX"
-ds_era5.attrs["InterpretiveProductCitation"] = "XXXXXX"
-ds_era5.attrs.update({
-    "Conventions": "CF-1.10, ACDD-1.3",
-    "title": "Reanalysis and projected water levels for Salish Sea stations",
-    "institution": "USGS PCMSC",
-    "source": "DFM ERA5 reanalysis; tidal-only runs; CMIP6 deltas",
-    "history": f"Created {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} with integer packing (scale_factor=1e-4).",
-    "references": "Add citations for DFM configuration, CMIP6 deltas, and interpretive products",
-})
-
-# ===============================================================================
-# Guardrails (final dataset)
-# ===============================================================================
-
-# 1) Time monotonic and no NaT
-tvals = ds_era5["time"].values
-assert np.all(~pd.isna(tvals)), "Found NaT in time after decode_cf"
-assert np.all(np.diff(tvals.astype("datetime64[ns]")) >= np.timedelta64(0, "ns")), "Time is not monotonically increasing"
-
-# 2) Station unique
-st = pd.Index(ds_era5["station"].values)
-assert st.is_unique, "Duplicate station IDs found"
-
-# 3) Big NaN blocks? Check variables to be written
-for v in ["waterlevel", "ntr", "wl_CmipDiff"]:
-    if v in ds_era5:
-        nan_by_time = ds_era5[v].isnull().mean(dim="station")
-        bad = (nan_by_time > 0.95)
-        if bool(bad.any()):
-            print(f"WARNING: {v} has time slices with >95% NaNs. Example indices:", np.where(bad.values)[0][:10])
-
-# ===============================================================================
-# Remove stations using a polygon.
-# ===============================================================================
-ds_era5, remove_flag = mask_stations_by_polygon(
-    ds_era5,
-    os.path.join(dir_gis, "StationRemove.shp"),
-    lat_var="lat",
-    lon_var="lon",
-    predicate="contains",  # or "covered_by" to include boundary points
-)
-print(f"Removed {int(remove_flag.sum().item())} stations.")
-
-# ===============================================================================
-# Load the county information for spatial grouping
-# ===============================================================================
-print("Loading County shapefiles and finding station subsets...")
-
-counties = gpd.read_file(os.path.join(dir_gis, "Washington_Counties_(no_water)___washco_area.shp"))
-counties = counties.to_crs(crs="EPSG:4326")
-
-county_list = [
-    "Kitsap", "Snohomish", "Island", "Skagit", "Jefferson",
-    "King", "Pierce", "Thurston", "Whatcom", "Mason",
-    "San Juan", "Clallam",
-]
-
-counties["COUNTY_norm"] = counties["COUNTY"].astype(str).map(normalize)
-alts = "|".join(re.escape(normalize(c)) for c in county_list)
-pattern = rf"(?:^|.*)({alts})(?:.*|$)"
-mask = counties["COUNTY_norm"].str.contains(pattern, regex=True, na=False)
-counties = counties[mask].copy()
-
-# Station GeoDataFrame from ds_era5
-stations = gpd.GeoDataFrame(
-    geometry=gpd.points_from_xy(ds_era5["lon"].values, ds_era5["lat"].values),
-    crs="EPSG:4326",
-)
-
-# Spatial join to assign county IDs to station indices
-Index_DFM = gpd.sjoin(counties, stations, how="right", predicate="intersects")
-Index_DFM = Index_DFM.rename(columns={"index_left": "CountyID"})
-Index_DFM["CountyID"] = Index_DFM["CountyID"].fillna(-999).astype("int32")
-
-# ===============================================================================
-# Output
-# ===============================================================================
-print("Outputting county datasets...")
-
+# Common encodings
 int_encoding = dict(
     dtype="int32",
     zlib=True,
@@ -539,22 +322,171 @@ coord_float_encoding = dict(
     complevel=5,
 )
 
-if not os.path.exists(dir_out):
-    os.makedirs(dir_out)
-    print("Output directory created.")
+# Iterate counties (streaming memory)
+for county_name_norm in county_order:
+    if county_name_norm == "outofcounty":
+        station_labels = out_of_county
+        if station_labels.size == 0:
+            print("Skipping OutOfCounty: no stations.")
+            continue
+        out_name = "OutOfCounty"
+    else:
+        station_labels = county_map[county_name_norm]
+        if station_labels.size == 0:
+            print(f"Skipping {county_name_norm}: no stations mapped.")
+            continue
+        # Recover nice county title from original list if desired
+        out_name = next((c for c in county_list if normalize(c) == county_name_norm), county_name_norm)
 
-ind_county = pd.Index(list(counties.index) + [-999])  # keep an OutOfCounty bucket
+    print(f"\n=== Processing county: {out_name} | {station_labels.size} station(s) ===")
 
-for county in ind_county:
-    county_name = counties.loc[county]["COUNTY_norm"] if county != -999 else "OutOfCounty"
-    print(f"Processing county {county_name}...")
+    # 1) Load subsets for this county
+    ds_full = load_and_concat_subset(era5_files, station_labels, preprocess=_preprocess, engine="netcdf4", label=f"ERA5/{out_name}")
+    ds_tidal = load_and_concat_subset(tidal_files, station_labels, preprocess=_preprocess, engine="netcdf4", label=f"Tidal/{out_name}")
+    ds_diff = load_and_concat_subset(diff_files, station_labels, preprocess=_preprocess, engine="netcdf4", label=f"CMIP6diff/{out_name}")
 
-    dfm_pnts = Index_DFM[Index_DFM["CountyID"] == county]
-    ds_county = ds_era5.isel(station=dfm_pnts.index)
-    ds_county.attrs["County"] = county_name
+    # 2) Align time range (tide often starts earlier)
+    ds_tidal = ds_tidal.sel(time=slice(ds_full["time"][0], ds_full["time"][-1]))
 
-    out_path = os.path.join(dir_out, f"Reanalysis_and_Projected_CoSMoSwaterlevels_{county_name}.nc")
-    ds_county.to_netcdf(
+    # 3) Resample to hourly nearest (2h tolerance) and ensure uniqueness
+    ds_full = ensure_unique_sorted_time(ds_full.resample(time="1h").nearest(tolerance="2h"))
+    ds_tidal = ensure_unique_sorted_time(ds_tidal.resample(time="1h").nearest(tolerance="2h"))
+    ds_diff = ensure_unique_sorted_time(ds_diff.resample(time="1h").nearest(tolerance="2h"))
+
+    # 4) Exact intersection along time & station
+    ds_full, ds_tidal, ds_diff = xr.align(ds_full, ds_tidal, ds_diff, join="inner")
+
+    # 5) Create ds_era5 for this county and derived variables
+    ds_era5 = ds_full.copy()
+    ds_era5["ntr"] = ds_full["waterlevel"] - ds_tidal["waterlevel"]
+
+    # Drop Bedlevel if present
+    if "bedlevel" in ds_era5:
+        ds_era5 = ds_era5.drop_vars("bedlevel")
+
+    # Clean lon/lat encodings and attributes
+    for var in ["lon", "lat"]:
+        if var in ds_era5:
+            da = ds_era5[var].copy().astype("float32")
+            for key in ("ScaleFactor", "scale_factor", "add_offset", "_FillValue", "dtype"):
+                da.attrs.pop(key, None)
+            da.encoding.clear()
+            ds_era5[var] = da
+
+    # CMIP6 diff range clamp (if packed ints were clipped)
+    if "cmip_diff" in ds_diff:
+        ds_diff["cmip_diff"] = ds_diff["cmip_diff"].where(
+            (ds_diff["cmip_diff"] >= -2_000_000_000) & (ds_diff["cmip_diff"] <= 2_000_000_000)
+        )
+
+    # Add wl_CmipDiff (convert to meters)
+    ds_era5["wl_CmipDiff"] = ds_diff["cmip_diff"] / 10000.0
+
+    # Scale to meters, remove SLR (cm)
+    ds_era5["waterlevel"] = ds_era5["waterlevel"] / 10000.0
+    ds_era5["ntr"] = ds_era5["ntr"] / 10000.0
+    ds_era5["waterlevel"] = ds_era5["waterlevel"] - (int(SLR) / 100.0)
+
+    # Monthly quantiles (per station within calendar month)
+    ds_era5["waterlevel"] = ds_era5["waterlevel"].astype("float32")
+    wl_quants = (
+        ds_era5["waterlevel"]
+        .groupby("time.month")
+        .map(lambda g: g.where(~np.isnan(g)).rank(dim="time", pct=True))
+        .astype("float32")
+    ).transpose("time", "station")
+    ds_era5["wl_quants"] = wl_quants
+
+    # Variable attrs (CF/ACDD tightened)
+    for v in ["waterlevel", "ntr"]:
+        if v in ds_era5:
+            ds_era5[v].attrs.update({
+                "units": "meters",
+                "reference": "NAVD88",
+                "coordinates": "lon lat station time",
+                "note": "Variable written with CF scale_factor=1e-4 (integer packing).",
+            })
+    if "waterlevel" in ds_era5:
+        ds_era5["waterlevel"].attrs.update({
+            "standard_name": "sea_surface_height_above_reference_datum",
+            "long_name": "water level (SLR removed)",
+            "precision": "Data encoded as integer with 4 significant digits.",
+        })
+    if "ntr" in ds_era5:
+        ds_era5["ntr"].attrs.update({
+            "long_name": "non-tidal residual",
+            "precision": "Data encoded as integer with 4 significant digits.",
+        })
+    if "wl_CmipDiff" in ds_era5:
+        ds_era5["wl_CmipDiff"].attrs.update({
+            "long_name": "CMIP6 difference in water levels",
+            "units": "meters",
+            "coordinates": "lon lat station time",
+            "usage": "Adding wl_CmipDiff to waterlevel produces the pseudo-global-warming time series.",
+            "note": "Variable written with CF scale_factor=1e-4 (integer packing).",
+            "precision": "Data encoded as integer with 4 significant digits.",
+        })
+    ds_era5["wl_quants"].attrs.update({
+        "units": "1",
+        "standard_name": "waterlevel_monthly_percentile",
+        "long_name": "Monthly water level percentile (per station, across all years)",
+        "coordinates": "lon lat station time",
+        "note": "Encoded as integer in file with scale_factor=1e-4 (see encoding).",
+    })
+    ds_era5["lon"].attrs.update({
+        "standard_name": "longitude", "long_name": "x-coordinate of station",
+        "projection": "WGS 84", "epsg": "4326", "units": "degree_east",
+    })
+    ds_era5["lat"].attrs.update({
+        "standard_name": "latitude", "long_name": "y-coordinate of station",
+        "projection": "WGS 84", "epsg": "4326", "units": "degrees_north",
+    })
+
+    # Global attrs
+    ds_era5.attrs["processing_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ds_era5.attrs["author"] = "Kai Parker (USGS PCMSC)"
+    ds_era5.attrs["description"] = (
+        "Modeled water levels and non-tidal residual for the reanalysis period. "
+        "Modeled changes to the reanalysis time series (as predicted by CMIP6) are also included. "
+        f"Output subset for county: {out_name}."
+    )
+    ds_era5.attrs.update({
+        "Conventions": "CF-1.10, ACDD-1.3",
+        "title": "Reanalysis and projected water levels for Salish Sea stations",
+        "institution": "USGS PCMSC",
+        "source": "DFM ERA5 reanalysis; tidal-only runs; CMIP6 deltas",
+        "history": f"Created {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} with integer packing (scale_factor=1e-4).",
+        "references": "Add citations for DFM configuration, CMIP6 deltas, and interpretive products",
+        "time_coverage_start": pd.to_datetime(ds_era5.time.values[0]).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "time_coverage_end": pd.to_datetime(ds_era5.time.values[-1]).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "geospatial_lat_min": float(ds_era5["lat"].min().values),
+        "geospatial_lat_max": float(ds_era5["lat"].max().values),
+        "geospatial_lon_min": float(ds_era5["lon"].min().values),
+        "geospatial_lon_max": float(ds_era5["lon"].max().values),
+        "geospatial_lat_units": "degrees_north",
+        "geospatial_lon_units": "degree_east",
+        "DataReleaseCitation": "XXXXXX",
+        "ModelCitation": "XXXXX",
+        "InterpretiveProductCitation": "XXXXXX",
+    })
+
+    # Guardrails
+    tvals = ds_era5["time"].values
+    assert np.all(~pd.isna(tvals)), "Found NaT in time after decode_cf"
+    assert np.all(np.diff(tvals.astype("datetime64[ns]")) >= np.timedelta64(0, "ns")), "Time is not monotonically increasing"
+    st = pd.Index(ds_era5["station"].values)
+    assert st.is_unique, "Duplicate station IDs found"
+
+    for v in ["waterlevel", "ntr", "wl_CmipDiff"]:
+        if v in ds_era5:
+            nan_by_time = ds_era5[v].isnull().mean(dim="station")
+            bad = (nan_by_time > 0.95)
+            if bool(bad.any()):
+                print(f"WARNING [{out_name}]: {v} has time slices with >95% NaNs. Example indices:", np.where(bad.values)[0][:10])
+
+    # Write county file (packed ints)
+    out_path = os.path.join(dir_out, f"Reanalysis_and_Projected_CoSMoSwaterlevels_{out_name}.nc")
+    ds_era5.to_netcdf(
         out_path,
         engine="netcdf4",
         encoding={
@@ -566,10 +498,8 @@ for county in ind_county:
             "lat": coord_float_encoding,
         },
     )
-
-    # Optional quick sanity check
+    # Smoke test
     with xr.open_dataset(out_path, engine="netcdf4") as chk:
-        print("Written:", out_path, "| vars:", list(chk.data_vars))
+        print(f"Written: {out_path} | vars:", list(chk.data_vars))
 
-print("All done.")
-
+print("\nAll counties processed. Done.")
