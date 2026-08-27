@@ -353,6 +353,11 @@ for county_name_norm in county_order:
     ds_tidal = ensure_unique_sorted_time(ds_tidal.resample(time="1h").nearest(tolerance="2h"))
     ds_diff = ensure_unique_sorted_time(ds_diff.resample(time="1h").nearest(tolerance="2h"))
 
+    nan_by_time = ds_diff["cmip_diff"].isnull().mean(dim="station")
+    print("ds_diff hourly NaN slices:", int((nan_by_time > 0).sum()))
+    print("Example hours with NaN:", pd.to_datetime(ds_diff.time.where(nan_by_time>0, drop=True).values[:10]))
+
+
     # 4) Exact intersection along time & station
     ds_full, ds_tidal, ds_diff = xr.align(ds_full, ds_tidal, ds_diff, join="inner")
 
@@ -498,8 +503,17 @@ for county_name_norm in county_order:
             "lat": coord_float_encoding,
         },
     )
+
+    
+    pre_write_nan_frac = float(ds_era5["wl_CmipDiff"].isnull().mean().values)
+    print("wl_CmipDiff NaN fraction BEFORE write:", pre_write_nan_frac)
+
     # Smoke test
     with xr.open_dataset(out_path, engine="netcdf4") as chk:
         print(f"Written: {out_path} | vars:", list(chk.data_vars))
+        
+        post_write_nan_frac = float(chk["wl_CmipDiff"].isnull().mean().values)
+        print("wl_CmipDiff NaN fraction AFTER write:", post_write_nan_frac)
+
 
 print("\nAll counties processed. Done.")
